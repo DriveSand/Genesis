@@ -1,0 +1,17 @@
+__pycache__/
+venv/
+env/
+.venv
+.env
+env.bak/
+venv.bak/
+data/
+bin/
+*.log
+.vscode/
+.DS_Store
+gallery/
+test/
+node_modules/
+dist/
+build/

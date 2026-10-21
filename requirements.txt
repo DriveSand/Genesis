@@ -1,0 +1,6 @@
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart>=0.0.9
+Pillow>=10.0
+watchdog>=4.0
+zipstream-ng>=1.8
