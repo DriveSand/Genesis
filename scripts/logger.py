@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import sys
@@ -84,6 +85,28 @@ class _ModuleNameFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.module = _qualified_module(record)
         return True
+
+
+class _ShutdownNoiseFilter(logging.Filter):
+    """抑制优雅关闭/客户端断开产生的 CancelledError 噪声。
+
+    强制结束长连接 (如 SSE) 时, uvicorn 会打印 "Cancel N running task(s)"
+    以及带有 CancelledError 的 ASGI 异常堆栈; 这两类记录没有诊断价值。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        exc = record.exc_info[1] if record.exc_info else None
+        if isinstance(exc, asyncio.CancelledError):
+            return False
+        try:
+            message = record.getMessage()
+        except Exception:  # noqa: BLE001 格式化失败时保留记录
+            return True
+        return not (message.startswith("Cancel ")
+                    and "timeout graceful shutdown exceeded" in message)
+
+
+_SHUTDOWN_NOISE_FILTER = _ShutdownNoiseFilter()
 
 
 # 格式化器
@@ -189,5 +212,11 @@ def setup_logging(log_level: str = "warn") -> None:
     console_handler.setFormatter(_ConsoleFormatter())
     console_handler.addFilter(_ModuleNameFilter())
     log.addHandler(console_handler)
+
+    # uvicorn 自身日志 (log_config=None 时经 root/最后兜底输出) 过滤关闭噪声
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        uvicorn_logger = logging.getLogger(name)
+        if _SHUTDOWN_NOISE_FILTER not in uvicorn_logger.filters:
+            uvicorn_logger.addFilter(_SHUTDOWN_NOISE_FILTER)
 
     _configured = True

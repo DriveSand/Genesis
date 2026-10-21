@@ -65,7 +65,25 @@ def _open_browser(host: str, port: int) -> None:
     webbrowser.open(f"http://{host}:{port}/")
 
 
-def _install_signal_handlers(server: uvicorn.Server) -> None:
+class _GenesisServer(uvicorn.Server):
+    """uvicorn Server: 优雅关闭开始时通知应用层主动结束 SSE 等长连接。
+
+    uvicorn 会在优雅关闭超时后强制取消剩余任务, 并输出 CancelledError
+    堆栈。提前置位 shutdown_event 可让 SSE 生成器正常返回, 避免该噪声。
+    """
+
+    def __init__(self, config: uvicorn.Config,
+                 shutdown_event: threading.Event) -> None:
+        super().__init__(config)
+        self._shutdown_event = shutdown_event
+
+    def handle_exit(self, sig: int, frame) -> None:
+        self._shutdown_event.set()
+        super().handle_exit(sig, frame)
+
+
+def _install_signal_handlers(server: uvicorn.Server,
+                             shutdown_event: threading.Event) -> None:
     """为终止信号安装"请求优雅停止"的处理器。
 
     uvicorn 在运行期间会接管 SIGINT/SIGTERM/SIGBREAK, 并在优雅关闭后恢复
@@ -74,6 +92,7 @@ def _install_signal_handlers(server: uvicorn.Server) -> None:
     """
     def _handle(signum, _frame) -> None:
         log.info(f"Signal {signum} received, stopping FastAPI")
+        shutdown_event.set()
         server.should_exit = True
 
     # SIGINT 保持 Python 默认处理 (KeyboardInterrupt): 启动阶段也能中断;
@@ -90,7 +109,8 @@ def _install_signal_handlers(server: uvicorn.Server) -> None:
 
 
 def _install_console_close_handler(server: uvicorn.Server,
-                                   done_event: threading.Event):
+                                   done_event: threading.Event,
+                                   shutdown_event: threading.Event):
     """Windows 控制台关闭/注销/关机: 触发优雅停止并尽量等待清理完成。
 
     Windows 在控制台关闭事件后约 5 秒强制结束进程, 因此等待上限设为 4.5 秒;
@@ -111,6 +131,7 @@ def _install_console_close_handler(server: uvicorn.Server,
         if ctrl_type not in close_events:
             return False
         log.info("Console close event received, stopping FastAPI")
+        shutdown_event.set()
         server.should_exit = True
         done_event.wait(4.5)
         return True
@@ -205,11 +226,14 @@ def main():
         # handler (包括本程序的日志文件), 这里保留现有日志配置
         uvicorn_config = uvicorn.Config(
             app, host=args.host, port=args.port, log_level="warning",
-            log_config=None)
-        server = uvicorn.Server(uvicorn_config)
-        _install_signal_handlers(server)
+            log_config=None,
+            # SSE 等长连接不会主动结束; 限时等待后强制关闭, 否则无法退出
+            timeout_graceful_shutdown=3)
+        server = _GenesisServer(uvicorn_config, state.shutdown_event)
+        _install_signal_handlers(server, state.shutdown_event)
         # 持有回调引用, 防止被垃圾回收后控制台处理器失效
-        console_handler = _install_console_close_handler(server, shutdown_done)
+        console_handler = _install_console_close_handler(
+            server, shutdown_done, state.shutdown_event)
         if console_handler is not None:
             server._genesis_console_handler = console_handler  # type: ignore[attr-defined]
         try:

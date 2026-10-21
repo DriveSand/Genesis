@@ -129,7 +129,9 @@ def load_external_folders(self, db: DataBase) -> tuple[dict[str, MountConfig], l
 
 从项目根目录（`FolderPath.BASE_PATH`）读取 `external_folder.json`，校验、消解物理路径冲突、经 `db` 在路径表逐级创建挂载节点。**仅启动时调用一次**；重复调用会重新加载并整体替换 `external_mounts`。**本方法不向调用方抛出任何异常**——单条失败仅告警并跳过，整体读取失败按空配置处理。
 
-输入文件的结构契约：顶层为 `{"<逻辑路径>": {"physical_path": str, "readonly": bool, "overlay": bool, "priority": int}}`。逻辑路径须以 `/` 开头、不含 `..` 与 `//`、不得为根 `/`；`physical_path` 须为存在目录的绝对路径；`priority` 须为非负整数；同一物理路径的多个逻辑挂载按 `priority 小者 → 去 '/' 后路径短者 → 逻辑路径字典序前者` 胜出，落选者与校验失败者进入 skipped。
+挂载目标节点已存在时：若为**空的内置目录**（路径表下无子目录、无文件记录），会将其转换为 `type='mount'` 的挂载点；若目录非空则记录错误并跳过。目标节点不存在时按需逐级创建。
+
+输入文件的结构契约：顶层为 `{"<逻辑路径>": {"physical_path": str, "readonly": bool, "priority": int}}`（其他未识别字段会被忽略，便于兼容旧配置）。逻辑路径须以 `/` 开头、不含 `..` 与 `//`、不得为根 `/`；`physical_path` 须为存在目录的绝对路径；`priority` 须为非负整数；同一物理路径的多个逻辑挂载按 `priority 小者 → 去 '/' 后路径短者 → 逻辑路径字典序前者` 胜出，落选者与校验失败者进入 skipped。
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |---|---|---|---|---|
@@ -152,7 +154,7 @@ def load_external_folders(self, db: DataBase) -> tuple[dict[str, MountConfig], l
 
 ```python
 @dataclass(frozen=True)
-MountConfig(logical_path: str, physical_path: str, readonly: bool, overlay: bool, priority: int)
+MountConfig(logical_path: str, physical_path: str, readonly: bool, priority: int)
 ```
 
 不可变的单挂载点配置；由 `load_external_folders` 产出，实例可直接作为 dict key / 入 `set`。
@@ -161,8 +163,7 @@ MountConfig(logical_path: str, physical_path: str, readonly: bool, overlay: bool
 |---|---|---|
 | `logical_path` | `str` | 挂载点逻辑路径（`/gallery` 下，如 `/abc`），以 `/` 开头 |
 | `physical_path` | `str` | 挂载的物理目录绝对路径 |
-| `readonly` | `bool` | 该挂载点禁止写入 |
-| `overlay` | `bool` | 覆盖模式标记；与 `readonly` 同时为 `True` 时，该挂载点及其所有子目录禁止写入文件（由文件管理模块运行时检查，本模块仅保存） |
+| `readonly` | `bool` | 该挂载点及其全部子目录禁止写入 |
 | `priority` | `int` | 物理路径冲突消解优先级，非负，越小越优先 |
 
 ---

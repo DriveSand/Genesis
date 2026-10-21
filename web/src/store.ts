@@ -389,16 +389,70 @@ export function syncScanner(): void {
 // 搜索
 // ---------------------------------------------------------------------- #
 
+/** 读取 start 处（双引号）开始的一个引号字符串; 支持 \" 转义。 */
+function readQuoted(text: string, start: number): { value: string; end: number } | null {
+  let value = ''
+  for (let i = start + 1; i < text.length; i++) {
+    const ch = text[i]
+    if (ch === '\\' && i + 1 < text.length) {
+      value += text[++i]
+      continue
+    }
+    if (ch === '"') return { value, end: i + 1 }
+    value += ch
+  }
+  return null
+}
+
+/**
+ * 解析简单搜索文本。
+ *
+ * `$p:` 后跟一个或多个双引号包裹的目录模式（空格必须写在引号内）：
+ *   $p:"/123"          根目录下 123 目录（不含子目录）
+ *   $p:"*\/123"        任意目录下 123 目录（不含子目录）
+ *   $p:"/123/*"        根目录下 123 目录（含子目录）
+ *   $p:"/123" "*\/test" 多个目录模式取 OR
+ * 未加引号的 `$p:/123` 仍按旧写法兼容。其余词条作为内容搜索。
+ */
 function parseBasicText(text: string): { content: string[]; paths: string[] } {
   const content: string[] = []
   const paths: string[] = []
-  for (const part of text.trim().split(/\s+/).filter(Boolean)) {
-    if (part.startsWith('$p:')) {
-      const value = part.slice(3)
+  let i = 0
+  const skipSpace = (from: number): number => {
+    while (from < text.length && /\s/.test(text[from])) from++
+    return from
+  }
+  while (i < text.length) {
+    i = skipSpace(i)
+    if (i >= text.length) break
+    if (text.startsWith('$p:', i)) {
+      const first = readQuoted(text, i + 3)
+      if (first) {
+        if (first.value.trim()) paths.push(first.value.trim())
+        i = first.end
+        // $p: 后可连续跟多个引号路径
+        for (;;) {
+          const j = skipSpace(i)
+          if (text[j] !== '"') break
+          const next = readQuoted(text, j)
+          if (!next) break
+          if (next.value.trim()) paths.push(next.value.trim())
+          i = next.end
+        }
+        continue
+      }
+      // 兼容旧写法 $p:/123
+      let j = i + 3
+      while (j < text.length && !/\s/.test(text[j])) j++
+      const value = text.slice(i + 3, j)
       if (value) paths.push(value)
-    } else {
-      content.push(part)
+      i = j
+      continue
     }
+    let j = i
+    while (j < text.length && !/\s/.test(text[j])) j++
+    content.push(text.slice(i, j))
+    i = j
   }
   return { content, paths }
 }

@@ -664,10 +664,18 @@ class FileManager:
         return new_lp
 
     def entry_stat(self, parent_path: str, name: str) -> dict[str, Any] | None:
-        """返回条目物理信息 (size/created_time/edit_time/is_dir); 不存在返回 None。"""
+        """返回条目物理信息 (size/created_time/edit_time/is_dir); 不存在返回 None。
+
+        /gallery 条目按挂载感知解析完整路径: 条目自身是挂载点时直接 stat 挂载
+        物理根, 而非本地影子目录 (影子目录可能与外部目录无关甚至不存在,
+        否则新建挂载点会一直显示为离线) 。
+        """
         validate_name(name)
         kind, segments = split_logical_path(parent_path)
-        phys = os.path.join(self._resolve_parent(kind, segments)[0], name)
+        if kind == "cache":
+            phys = os.path.join(self._resolve_parent(kind, segments)[0], name)
+        else:
+            phys = self._resolver.segments_to_physical(segments + [name])
         try:
             st = os.stat(phys)
         except OSError:
@@ -1169,6 +1177,8 @@ class FileManager:
             self._spawn_timer(_RECOVERY_POLL_INTERVAL, self._recovery_poll, mount_key)
             return
         state["watch"] = watch
+        # 上次运行遗留的 offline 状态在本次挂载成功时复位
+        self._set_mount_status(state, "normal")
         self._spawn_timer(_HEALTH_CHECK_INTERVAL, self._health_check, mount_key)
 
     def _locate_root(self, physical: str) -> tuple[str, str] | None:
@@ -1595,8 +1605,17 @@ class FileManager:
                 log.error(f"Startup sync failed: {logical} ({e})")
         log.info("Startup database sync completed")
 
+    def _is_mount_point(self, segments: list[str]) -> bool:
+        """逻辑段列表是否恰好是一个已配置的挂载点。"""
+        key = self._resolver.mount_key_of(segments)
+        return key is not None and key == "/" + "/".join(segments)
+
     def _sync_dir(self, physical_dir: str, segments: list[str]) -> None:
-        """递归对账单个目录: 磁盘条目补齐入库, 数据库失效记录移除。"""
+        """递归对账单个目录: 磁盘条目补齐入库, 数据库失效记录移除。
+
+        挂载点（及其阴影目录）由挂载根自身负责对账, 此处跳过,
+        避免本地空目录把外部挂载中的文件记录误删。
+        """
         try:
             with self._db_lock:
                 dir_uuid, _ = self._resolver.walk_segments(segments)
@@ -1624,6 +1643,9 @@ class FileManager:
             if is_dir:
                 dir_names.add(name)
                 child_segments = segments + [name]
+                if self._is_mount_point(child_segments):
+                    # 挂载点的本地阴影目录不参与对账 (含目录不存在的情况)
+                    continue
                 try:
                     with self._db_lock:
                         self._ensure_dir_records(child_segments)
@@ -1641,6 +1663,8 @@ class FileManager:
             for child in self.db.list_paths(dir_uuid):
                 if child["name"] in dir_names:
                     continue
+                if self._is_mount_point(segments + [child["name"]]):
+                    continue  # 挂载节点不依赖本地阴影目录是否存在
                 if os.path.isdir(os.path.join(physical_dir, child["name"])):
                     continue
                 log.info(f"Startup sync removed directory record: "

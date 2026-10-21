@@ -21,6 +21,8 @@ class AppState:
     #   "files": {token: {"name","mime","sha256","size","chunks","finalizing"}}}
     uploads: dict[str, dict[str, Any]] = field(default_factory=dict)
     upload_lock: threading.Lock = field(default_factory=threading.Lock)
+    # 服务开始优雅关闭时置位; SSE 等长连接据此主动结束, 避免被强制取消
+    shutdown_event: threading.Event = field(default_factory=threading.Event)
 
     # 上传任务过期时间 (秒): 超过该时长未完成的任务视为废弃
     UPLOAD_TTL = 24 * 3600

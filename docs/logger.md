@@ -39,6 +39,7 @@ def setup_logging(log_level: str = "warn") -> None
 - 支持重复调用：旧的 handler 会被移除并关闭后重建，不会产生重复输出。
 - 文件行格式：`[yyyy/mm/dd HH:MM:SS] [等级] [模块] 内容`（UTF-8 编码）。
 - 控制台行格式：`[等级] [模块] 内容`，等级带 ANSI 颜色（Windows 终端自动启用虚拟转义处理）。
+- 同时在 `uvicorn` / `uvicorn.error` / `uvicorn.access` 上安装关闭噪声过滤器：丢弃 `CancelledError` 的 ASGI 异常堆栈，以及 "Cancel N running task(s), timeout graceful shutdown exceeded" 提示；其他 uvicorn 日志不受影响。
 
 ### 异常
 

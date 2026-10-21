@@ -259,7 +259,7 @@ def _list_paths_impl(conn: sqlite3.Connection,
 
 def _update_path_impl(conn: sqlite3.Connection, path_uuid: str, name: Any,
                       status: Any, conflict_state: Any,
-                      last_checked: Any) -> bool:
+                      last_checked: Any, path_type: Any = _UNSET) -> bool:
     """更新路径节点字段。未传入的参数保持不变 (显式传 None 表示置空)。
 
     先查后改均在同一写事务内 (写连接) , 避免并发下的检查失效。
@@ -289,6 +289,23 @@ def _update_path_impl(conn: sqlite3.Connection, path_uuid: str, name: Any,
         updates["conflict_state"] = conflict_state
     if last_checked is not _UNSET:
         updates["last_checked"] = last_checked
+    if path_type is not _UNSET:
+        if is_root:
+            raise InputDataError("Root path type cannot be modified")
+        if path_type not in _PATH_TYPES:
+            raise InputDataError(f"Invalid path type: {path_type}")
+        if path_type == "mount" and row["type"] != "mount":
+            # 只允许把空目录转换为挂载点, 防止原有内容被外部目录遮蔽
+            has_child = conn.execute(
+                "SELECT 1 FROM path WHERE parent_uuid = ? LIMIT 1",
+                (path_uuid,)).fetchone() is not None
+            has_file = conn.execute(
+                "SELECT 1 FROM file WHERE path_uuid = ? LIMIT 1",
+                (path_uuid,)).fetchone() is not None
+            if has_child or has_file:
+                raise InputDataError(
+                    "Only an empty directory can be converted to a mount point")
+        updates["type"] = path_type
     if not updates:
         return False
 
@@ -707,6 +724,54 @@ def _like_param(value: Any) -> str:
     return f"%{escaped}%"
 
 
+def _path_like(pattern: str) -> str:
+    """目录路径模式 -> LIKE 参数: '*' 为通配符, 其余 % _ \\ 按字面匹配。"""
+    out: list[str] = []
+    for ch in pattern:
+        if ch == "*":
+            out.append("%")
+        elif ch in ("\\", "%", "_"):
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _path_pattern_clauses(patterns: list[str]) -> list[tuple[str, list[str]]]:
+    """基本搜索目录模式 -> OR 条件组 [(SQL, 参数), ...]。
+
+    语义:
+    - ``/123``   根目录下的 123 目录 (不含子目录)
+    - ``*/123``  任意目录下的 123 目录 (不含子目录, '*' 可跨层级)
+    - ``/123/*`` 根目录下的 123 目录及其全部子目录
+    - ``123``    旧行为: 目录路径模糊包含
+    """
+    clauses: list[tuple[str, list[str]]] = []
+    for raw in patterns:
+        pattern = str(raw).strip()
+        if not pattern:
+            continue
+        if pattern.endswith("/*"):
+            base = pattern[:-2].rstrip("/") or "/"
+            if base == "/":  # /* 覆盖整个图库
+                clauses.append(("1 = 1", []))
+                continue
+            like = _path_like(base)
+            clauses.append((
+                "(d.full LIKE ? ESCAPE '\\' OR d.full LIKE ? ESCAPE '\\')",
+                [like, like + "/%"],
+            ))
+            continue
+        pattern = pattern.rstrip("/") or "/"
+        like = _path_like(pattern)
+        if pattern.startswith("/") or pattern.startswith("*"):
+            clauses.append(("d.full LIKE ? ESCAPE '\\'", [like]))
+        else:
+            # 未以 '/' 或 '*' 开头: 保持目录名模糊匹配
+            clauses.append(("d.full LIKE ? ESCAPE '\\'", [f"%{like}%"]))
+    return clauses
+
+
 def _search_where(spec: dict[str, Any]) -> tuple[str, list[Any]]:
     """结构化搜索条件 -> WHERE 子句与参数 (供 search_files 使用)。
 
@@ -755,7 +820,12 @@ def _search_where(spec: dict[str, Any]) -> tuple[str, list[Any]]:
                          " OR f.filename LIKE ? ESCAPE '\\')")
             params.extend((_like_param(v), _like_param(v)))
         clauses.append("(" + " OR ".join(parts) + ")")
-    add_any_like("d.full", spec.get("paths", []))
+    # 基本搜索目录模式 ($p: 后的引号路径): 同组内取 OR
+    path_clauses = _path_pattern_clauses(spec.get("paths", []))
+    if path_clauses:
+        clauses.append("(" + " OR ".join(sql for sql, _ in path_clauses) + ")")
+        for _sql, values in path_clauses:
+            params.extend(values)
 
     add_any_like("d.full", spec.get("path_include", []))
     add_all_not_like("d.full", spec.get("path_exclude", []))
@@ -1363,10 +1433,15 @@ class DataBase:
         return _submit_read(_list_paths_impl, parent_uuid)
 
     def update_path(self, path_uuid: str, name: Any = _UNSET, status: Any = _UNSET,
-                    conflict_state: Any = _UNSET, last_checked: Any = _UNSET) -> bool:
-        """更新路径节点字段。未传入的参数保持不变 (显式传 None 表示置空) """
+                    conflict_state: Any = _UNSET, last_checked: Any = _UNSET,
+                    path_type: Any = _UNSET) -> bool:
+        """更新路径节点字段。未传入的参数保持不变 (显式传 None 表示置空)
+
+        path_type 仅允许在 'inbuilt' / 'mount' 间切换; 把非空目录转换为
+        'mount' 会被拒绝。
+        """
         return _submit_write(_update_path_impl, path_uuid, name, status,
-                             conflict_state, last_checked)
+                             conflict_state, last_checked, path_type)
 
     def move_path(self, path_uuid: str, parent_uuid: str, name: str) -> bool:
         """移动/重命名目录节点 (保留节点 uuid, 子树与文件记录不变)。"""

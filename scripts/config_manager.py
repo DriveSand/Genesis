@@ -49,13 +49,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
 class MountConfig:
     """单个外部挂载点配置。
 
-    readonly + overlay 均为 True 时，该挂载点及其所有子目录禁止写入文件；
-    此规则由文件操作模块在运行时检查，本模块仅原样保存。
+    readonly 为 True 时该挂载点及其所有子目录禁止写入文件。
     """
     logical_path: str
     physical_path: str
     readonly: bool
-    overlay: bool
     priority: int
 
 
@@ -109,16 +107,12 @@ def _validate_entry(logical_path: str, entry: Any) -> tuple[MountConfig | None, 
     if not isinstance(readonly, bool):
         return None, "readonly must be a boolean"
 
-    overlay = entry.get("overlay")
-    if not isinstance(overlay, bool):
-        return None, "overlay must be a boolean"
-
     # bool 是 int 的子类，需显式排除
     priority = entry.get("priority")
     if isinstance(priority, bool) or not isinstance(priority, int) or priority < 0:
         return None, "priority must be a non-negative integer"
 
-    return MountConfig(logical_path, physical_path, readonly, overlay, priority), None
+    return MountConfig(logical_path, physical_path, readonly, priority), None
 
 
 def _norm_physical(physical_path: str) -> str:
@@ -140,9 +134,9 @@ def _ensure_mount_path(db: "DataBase", logical_path: str) -> str | None:
     """确保逻辑路径在路径表中存在，逐级创建缺失节点，返回挂载目标节点 uuid。
 
     - 新建中间节点 type='inbuilt'，最终挂载目标节点 type='mount'
+    - 已存在的空内置目录会转换为挂载点；非空目录则跳过
     - status='normal'、conflict_state=NULL 由 database 模块保证
-    - 途中发现同名节点已是挂载点（非最终层）或最终目标已被内置目录占用时，
-      记录错误并返回 None（跳过该挂载点）
+    - 途中发现同名节点已是挂载点（非最终层）时记录错误并跳过
     """
     segments = [s for s in logical_path.split("/") if s]
     if not segments:
@@ -172,11 +166,23 @@ def _ensure_mount_path(db: "DataBase", logical_path: str) -> str | None:
                 return None
             # type == 'inbuilt'
             if is_final:
-                log.error(
-                    f"Failed to create mount path '{logical_path}': "
-                    f"target node '{seg}' already exists as an inbuilt directory"
-                )
-                return None
+                # 空目录可以作为挂载点: 转换为 mount 类型
+                if (db.list_paths(existing["uuid"])
+                        or db.list_files_by_path(existing["uuid"])):
+                    log.error(
+                        f"Failed to create mount path '{logical_path}': "
+                        f"target directory '{seg}' is not empty")
+                    return None
+                try:
+                    db.update_path(existing["uuid"], path_type="mount")
+                except Exception as e:  # noqa: BLE001
+                    log.error(
+                        f"Failed to convert empty directory to mount point "
+                        f"'{logical_path}': {e}")
+                    return None
+                log.info(f"Empty directory converted to mount point: "
+                         f"{logical_path}")
+                return existing["uuid"]
             current = existing["uuid"]
         else:
             node_type = "mount" if is_final else "inbuilt"

@@ -107,7 +107,7 @@ async def scan(request: Request, name: str, uuid: str) -> StreamingResponse:
     async def event_stream():
         last: tuple | None = None
         tick = 0
-        while True:
+        while not state.shutdown_event.is_set():
             if await request.is_disconnected():
                 break
             try:
@@ -121,7 +121,11 @@ async def scan(request: Request, name: str, uuid: str) -> StreamingResponse:
                 yield ": keepalive\n\n"
             last = current
             tick += 1
-            await asyncio.sleep(2)
+            # 轮询间隔 2 秒, 但分片等待以便停机时在 0.2 秒内结束连接
+            for _ in range(10):
+                if state.shutdown_event.is_set():
+                    return
+                await asyncio.sleep(0.2)
 
     return StreamingResponse(
         event_stream(),

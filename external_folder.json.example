@@ -2,7 +2,6 @@
   "/example": {
     "physical_path": "D:\\Pictures\\Example",
     "readonly": false,
-    "overlay": false,
     "priority": 0
   }
 }
