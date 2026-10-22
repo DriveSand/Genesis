@@ -50,9 +50,10 @@ def iter_parsers() -> tuple[ModuleType, ...]:
 # ---- 注册表 (扩展点) ----
 # 新增解析器三步: 1) 新建 <tool>.py 实现契约  2) 在此 import  3) 按优先级插入列表。
 # 匹配规则: 顺序遍历, 第一个 can_parse()==True 的解析器独占解析权 (首个匹配即权威) 。
-from scripts.parsers import a1111  # noqa: E402  必须放在 RawMetadata 定义之后
+from scripts.parsers import a1111, comfyui  # noqa: E402  必须放在 RawMetadata 定义之后
 
-_PARSERS: list[ModuleType] = [a1111]
-# 日后 (示例) : 
-# from scripts.parsers import comfyui, fooocus
+# ComfyUI 优先: 同时具备工作流与 A1111 infotext 的图片按 ComfyUI 处理
+_PARSERS: list[ModuleType] = [comfyui, a1111]
+# 日后 (示例) :
+# from scripts.parsers import fooocus
 # _PARSERS = [comfyui, a1111, fooocus]
