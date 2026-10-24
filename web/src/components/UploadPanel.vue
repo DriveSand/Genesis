@@ -2,7 +2,7 @@
 import Icon from './Icon.vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ApiError, api, formatBytes, sha256OfFile } from '../api'
-import { loadContents, store, toast, toastError } from '../store'
+import { loadContents, localizeError, store, toast, toastError } from '../store'
 
 interface UploadItem {
   id: number
@@ -316,6 +316,11 @@ async function start(): Promise<void> {
   await proceedUpload(todo)
 }
 
+/** 上传失败信息本地化: 只读拒绝是后端英文错误中唯一需要翻译的常见场景。 */
+function uploadErrorText(error?: string, target?: string): string {
+  return localizeError(error, '上传', { target }) || '上传失败'
+}
+
 async function uploadOne(
   item: UploadItem,
   taskId: string,
@@ -334,7 +339,7 @@ async function uploadOne(
     form.append('file', chunk, item.file.name)
     const result = await api.executeUpload(form)
     if (result.status === 'fail') {
-      throw new Error(result.error || '上传失败')
+      throw new Error(uploadErrorText(result.error, item.target))
     }
     item.progress = Math.round(((index + 1) / total) * 100)
     if (result.status === 'success') {
@@ -423,7 +428,8 @@ async function proceedUpload(todo: UploadItem[]): Promise<void> {
           await uploadOne(item, task.task_id, result.token, task.chunk_size)
         } catch (err) {
           item.status = 'error'
-          item.message = err instanceof Error ? err.message : '上传失败'
+          item.message = err instanceof Error
+            ? uploadErrorText(err.message, item.target) : '上传失败'
         }
       }
     }
@@ -435,7 +441,7 @@ async function proceedUpload(todo: UploadItem[]): Promise<void> {
     }
     await loadContents(store.path, false)
   } catch (err) {
-    toastError(err, '上传失败')
+    toastError(err, '上传失败', { target: store.path, action: '上传' })
   } finally {
     running.value = false
     pendingTodo = []

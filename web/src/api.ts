@@ -64,7 +64,13 @@ export interface UploadExecuteResult {
 }
 
 export const api = {
-  status: () => request<{ ok: boolean; read_only: boolean; enable_thumbnail: boolean }>('/api/v1/status'),
+  status: () => request<{
+    ok: boolean
+    read_only: boolean
+    enable_thumbnail: boolean
+    version: string
+    database_version: number
+  }>('/api/v1/status'),
 
   getSettings: () => request<{ settings: Settings }>('/api/v1/settings'),
 

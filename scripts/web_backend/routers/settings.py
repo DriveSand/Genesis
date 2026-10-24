@@ -14,7 +14,7 @@ router = APIRouter(prefix="/api/v1/settings", tags=["settings"])
 
 _SIZES = ("ThumbnailShortSideSize", "GridCellSize")
 _FLAGS = ("EnableThumbnail", "AutoRefresh", "SafeBrowsingMode")
-_RATING_KEYS = ("NewlyAddedImageLevel", "BlurLevel")
+_RATING_KEYS = ("NewlyAddedImageLevel",)
 
 
 def _validate_change(change: dict[str, Any]) -> None:
@@ -32,6 +32,11 @@ def _validate_change(change: dict[str, Any]) -> None:
             value = change[key]
             if isinstance(value, bool) or value not in (0, 1, 2, 3, 4):
                 raise InputDataError(f"{key} must be an integer in [0, 4]")
+    if "BlurLevel" in change:
+        value = change["BlurLevel"]
+        # -1 = None (不模糊任何等级)
+        if isinstance(value, bool) or value not in (-1, 0, 1, 2, 3, 4):
+            raise InputDataError("BlurLevel must be an integer in [-1, 4]")
     if "DatabaseIdleCheckpointMinutes" in change:
         value = change["DatabaseIdleCheckpointMinutes"]
         if isinstance(value, bool) or not isinstance(value, int) \

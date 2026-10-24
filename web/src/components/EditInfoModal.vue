@@ -4,6 +4,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import {
   afterMetadataSaved,
+  askConfirm,
   closeEditor,
   editTarget,
   imagePathOf,
@@ -132,7 +133,16 @@ function addModel(): void {
   models.value.push({ kind: 'Checkpoint', name: '', version: '', url: '', weight: null })
 }
 
-function removeModel(index: number): void {
+async function removeModel(index: number): Promise<void> {
+  const model = models.value[index]
+  if (!model) return
+  const label = model.name.trim() ? `“${model.name.trim()}”` : '该模型'
+  const ok = await askConfirm(
+    '移除模型',
+    `确定要移除${label}吗？保存修改后才会生效。`,
+    { danger: true },
+  )
+  if (!ok) return
   models.value.splice(index, 1)
 }
 
@@ -438,6 +448,7 @@ function emitClose(): void {
 .model-head {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 6px;
   margin-bottom: 8px;
 }

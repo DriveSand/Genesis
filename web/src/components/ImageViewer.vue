@@ -4,10 +4,13 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, formatBytes, formatTime } from '../api'
 import {
   closeViewer,
+  concealFile,
   copyTextToClipboard,
   currentViewerFile,
   downloadSingle,
   imagePathOf,
+  isBlurred,
+  isFileRevealed,
   openEditor,
   reparseMetadata,
   store,
@@ -19,18 +22,23 @@ const rotation = ref(0)
 const zoom = ref(1)
 const zoomHintVisible = ref(false)
 const MIN_ZOOM = 0.1
-const MAX_ZOOM = 4
+// 最大放大 2000% 这下应该没有人说看不清细节了
+const MAX_ZOOM = 20
 const ZOOM_STEP = 0.25
 let zoomHintTimer: number | undefined
 
-// 滚轮缩放: 连续快速滚动时单步放大到 10%, 停止后恢复 1%
+// 滚轮缩放: 连续快速滚动时单步放大到 10%;
+// 保持快速滑动 3 秒后进一步放大到 50%; 停止后恢复 1%
 const WHEEL_STEP = 0.01
 const WHEEL_FAST_STEP = 0.1
+const WHEEL_ULTRA_STEP = 0.5
 const WHEEL_RAPID_INTERVAL = 300
 const WHEEL_RESET_DELAY = 450
+const WHEEL_ULTRA_AFTER = 2000
 let wheelLastAt = 0
 let wheelDirection = 0
 let wheelRapid = false
+let wheelRapidSince = 0
 let wheelResetTimer: number | undefined
 
 watch(zoom, () => {
@@ -45,6 +53,10 @@ const file = computed(() => currentViewerFile.value)
 const imageUrl = computed(() =>
   file.value ? `${api.originalUrl(imagePathOf(file.value))}&v=${store.viewerBust}` : '',
 )
+const imageTransform = computed(() => locked.value
+  ? `rotate(${rotation.value}deg) scale(1.3)`
+  : `translate(${panX.value}px, ${panY.value}px) rotate(${rotation.value}deg) scale(${zoom.value})`,
+)
 const meta = computed(() => store.metadata)
 const models = computed(() => store.models)
 const ratingName = computed(() =>
@@ -53,6 +65,34 @@ const ratingName = computed(() =>
 const ratingColor = computed(() =>
   meta.value ? RATING_COLORS[meta.value.rating] ?? '#0078d4' : '#0078d4',
 )
+
+// 查看器内的临时"显示"状态: 切换图片后复位, 不写回主界面
+const viewerRevealed = ref(false)
+const fileRating = computed(() => file.value?.rating ?? 0)
+const sensitive = computed(() => file.value !== null && isBlurred(fileRating.value))
+const locked = computed(() =>
+  sensitive.value && !!file.value
+  && !isFileRevealed(file.value) && !viewerRevealed.value,
+)
+const fileRatingName = computed(() =>
+  RATING_NAMES[fileRating.value] ?? String(fileRating.value),
+)
+const fileRatingColor = computed(() =>
+  RATING_COLORS[fileRating.value] ?? '#0078d4',
+)
+
+function revealViewer(): void {
+  viewerRevealed.value = true
+}
+
+function reblur(): void {
+  if (!file.value) return
+  viewerRevealed.value = false
+  concealFile(file.value)  // 同时取消主界面的"已显示"状态
+  zoom.value = 1
+  panX.value = 0
+  panY.value = 0
+}
 
 const modelRows = computed(() => {
   const m = models.value
@@ -97,14 +137,17 @@ function rotateRight(): void {
 }
 
 function zoomIn(): void {
+  if (locked.value) return
   zoom.value = Math.min(MAX_ZOOM, zoom.value + ZOOM_STEP)
 }
 
 function zoomOut(): void {
+  if (locked.value) return
   zoom.value = Math.max(MIN_ZOOM, zoom.value - ZOOM_STEP)
 }
 
 function toggleZoom(): void {
+  if (locked.value) return
   zoom.value = zoom.value === 1 ? 2 : 1
 }
 
@@ -114,6 +157,7 @@ function clampZoom(value: number): number {
 
 function resetWheelRapid(): void {
   wheelRapid = false
+  wheelRapidSince = 0
   wheelLastAt = 0
   wheelDirection = 0
   if (wheelResetTimer) {
@@ -123,18 +167,25 @@ function resetWheelRapid(): void {
 }
 
 function onWheel(event: WheelEvent): void {
+  if (locked.value) return  // 模糊状态下禁止缩放
   const direction = event.deltaY < 0 ? 1 : -1
   const now = performance.now()
   // 同方向且间隔足够短视为连续快速滑动, 步进临时放大到 10%
   const rapid = now - wheelLastAt <= WHEEL_RAPID_INTERVAL
     && direction === wheelDirection
+  if (rapid && !wheelRapid) wheelRapidSince = now
+  else if (!rapid) wheelRapidSince = 0
   wheelRapid = rapid
   wheelLastAt = now
   wheelDirection = direction
   if (wheelResetTimer) window.clearTimeout(wheelResetTimer)
   wheelResetTimer = window.setTimeout(resetWheelRapid, WHEEL_RESET_DELAY)
-  zoom.value = clampZoom(
-    zoom.value + direction * (wheelRapid ? WHEEL_FAST_STEP : WHEEL_STEP))
+  // 快速滑动持续 2 秒后, 单步提升到 50%
+  const ultra = rapid && wheelRapidSince > 0
+    && now - wheelRapidSince >= WHEEL_ULTRA_AFTER
+  const step = ultra ? WHEEL_ULTRA_STEP
+    : rapid ? WHEEL_FAST_STEP : WHEEL_STEP
+  zoom.value = clampZoom(zoom.value + direction * step)
 }
 
 // ---------------- 放大后拖动 ----------------
@@ -145,7 +196,7 @@ const dragging = ref(false)
 let dragState = { x: 0, y: 0, px: 0, py: 0, moved: false }
 
 function onImageMouseDown(event: MouseEvent): void {
-  if (zoom.value <= 1) return
+  if (locked.value || zoom.value <= 1) return
   dragging.value = true
   dragState = {
     x: event.clientX, y: event.clientY,
@@ -188,12 +239,20 @@ watch(
   () => store.viewerIndex,
   () => {
     resetWheelRapid()
+    viewerRevealed.value = false  // 切换图片后重新模糊
     rotation.value = 0
     zoom.value = 1
     panX.value = 0
     panY.value = 0
   },
 )
+
+watch(locked, (value) => {
+  if (!value) return
+  zoom.value = 1
+  panX.value = 0
+  panY.value = 0
+})
 
 watch(zoom, (value) => {
   if (value <= 1) {
@@ -222,13 +281,22 @@ onBeforeUnmount(() => {
       <button class="nav-arrow left" title="上一张" @click="viewerStep(-1)">
         <Icon name="left" label="prev" />
       </button>
-      <img v-if="file" class="main-image" :class="{ dragging }" :src="imageUrl" :alt="file.name"
-           :style="{ transform: `translate(${panX}px, ${panY}px) rotate(${rotation}deg) scale(${zoom})` }"
+      <img v-if="file" class="main-image"
+           :class="{ dragging, blurred: locked, locked }" :src="imageUrl" :alt="file.name"
+           :style="{ transform: imageTransform }"
            @mousedown="onImageMouseDown" @click="onImageClick" />
       <button class="nav-arrow right" title="下一张" @click="viewerStep(1)">
         <Icon name="right" label="next" />
       </button>
-      <div v-if="zoomHintVisible" class="zoom-hint">{{ Math.round(zoom * 100) }}%</div>
+      <div v-if="locked" class="locked-overlay">
+        <div class="lock-content">
+          <Icon name="protection" class="lock-icon" label="locked" />
+          <span class="badge lock-badge" :style="{ background: fileRatingColor }">{{ fileRatingName }}</span>
+          <span class="lock-text">已模糊处理该图像</span>
+          <button class="btn accent lock-show-btn" @click.stop="revealViewer">显示</button>
+        </div>
+      </div>
+      <div v-if="zoomHintVisible && !locked" class="zoom-hint">{{ Math.round(zoom * 100) }}%</div>
       <div v-if="store.viewerLoading" class="loading">正在读取信息…</div>
     </div>
 
@@ -236,10 +304,10 @@ onBeforeUnmount(() => {
       <button class="rail-btn" title="关闭 (Esc)" @click="closeViewer">
         <Icon name="close" label="close" />
       </button>
-      <button class="rail-btn" title="放大" :disabled="zoom >= MAX_ZOOM" @click="zoomIn">
+      <button class="rail-btn" title="放大" :disabled="locked || zoom >= MAX_ZOOM" @click="zoomIn">
         <Icon name="zoom-in" label="zoom in" />
       </button>
-      <button class="rail-btn" title="缩小" :disabled="zoom <= MIN_ZOOM" @click="zoomOut">
+      <button class="rail-btn" title="缩小" :disabled="locked || zoom <= MIN_ZOOM" @click="zoomOut">
         <Icon name="zoom-out" label="zoom out" />
       </button>
       <button class="rail-btn" title="向左旋转 90°" @click="rotateLeft">
@@ -247,6 +315,10 @@ onBeforeUnmount(() => {
       </button>
       <button class="rail-btn" title="向右旋转 90°" @click="rotateRight">
         <Icon name="rotate" label="rotate right" />
+      </button>
+      <button v-if="sensitive" class="rail-btn" title="重新模糊"
+              :disabled="locked" @click="reblur">
+        <Icon name="preview-close" label="re-blur" />
       </button>
     </div>
 
@@ -402,6 +474,69 @@ onBeforeUnmount(() => {
 .main-image.dragging {
   cursor: grabbing;
   transition: none;
+}
+
+/* 实测模糊半径为 128px 时，你摘下眼镜看/离远看/截图发聊天软件看，都看不清具体内容 */
+.main-image.blurred {
+  filter: blur(128px) saturate(0.7) brightness(0.75);
+}
+
+.main-image.locked {
+  cursor: default;
+}
+
+.locked-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: rgba(16, 16, 16, 0.55);
+  pointer-events: none;
+}
+
+.locked-overlay .btn {
+  pointer-events: auto;
+}
+
+/* 提示内容整体约占展示区域的 30% */
+.lock-content {
+  width: 30%;
+  min-width: 300px;
+  max-width: 560px;
+  min-height: 30%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-evenly;
+  gap: 12px;
+}
+
+.lock-icon {
+  width: clamp(80px, 12vmin, 180px);
+  height: auto;
+  color: var(--warn);
+}
+
+.lock-badge {
+  height: auto;
+  padding: 4px clamp(14px, 2vmin, 28px);
+  font-size: clamp(16px, 2.2vmin, 28px);
+  line-height: 1.4;
+}
+
+.lock-text {
+  color: var(--text);
+  font-size: clamp(15px, 2vmin, 24px);
+}
+
+.lock-show-btn {
+  height: clamp(40px, 5.5vmin, 68px);
+  padding: 0 clamp(22px, 3vmin, 40px);
+  font-size: clamp(16px, 2.2vmin, 26px);
 }
 
 .nav-arrow {

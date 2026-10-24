@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { applySettings, store } from '../store'
-import { RATING_NAMES } from '../types'
+import { BLUR_LEVELS, RATING_NAMES } from '../types'
 
 const panelEl = ref<HTMLElement | null>(null)
 
@@ -82,9 +82,12 @@ function toggleSafeBrowsing(): void {
     <div class="quick-section">
       <label class="quick-label">开始模糊的等级</label>
       <div class="chips">
-        <span v-for="(name, level) in RATING_NAMES" :key="name" class="chip"
-              :class="{ active: store.settings.BlurLevel === level }"
-              @click="setBlurLevel(level)">{{ name }}</span>
+        <!-- 旧配置可能仍为 0 (G) -->
+        <span v-if="store.settings.BlurLevel === 0" class="chip active"
+              @click="setBlurLevel(0)">G</span>
+        <span v-for="level in BLUR_LEVELS" :key="level.value" class="chip"
+              :class="{ active: store.settings.BlurLevel === level.value }"
+              @click="setBlurLevel(level.value)">{{ level.label }}</span>
       </div>
     </div>
 

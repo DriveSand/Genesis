@@ -3,10 +3,12 @@ import Icon from './Icon.vue'
 import { computed, ref, watch } from 'vue'
 import { api, formatBytes, formatTime } from '../api'
 import {
+  concealFile,
   deleteTargets,
   downloadTargets,
   imagePathOf,
   isBlurred,
+  isFileRevealed,
   loadMore,
   navigate,
   openBackgroundContext,
@@ -15,6 +17,8 @@ import {
   openInNewTab,
   openMoveDialog,
   openViewer,
+  resetRevealedFiles,
+  revealFile,
   store,
   visibleFiles,
   visibleFolders,
@@ -24,7 +28,6 @@ import { RATING_COLORS, RATING_NAMES } from '../types'
 import type { SearchFile } from '../types'
 
 const scrollEl = ref<HTMLElement | null>(null)
-const revealed = ref(new Set<string>())
 const failedThumbs = ref(new Set<string>())
 const selected = ref(new Set<string>())
 
@@ -55,23 +58,8 @@ function onThumbError(file: SearchFile): void {
   }
 }
 
-function isRevealed(file: SearchFile): boolean {
-  return revealed.value.has(fileKey(file))
-}
-
-function reveal(file: SearchFile): void {
-  revealed.value.add(fileKey(file))
-  revealed.value = new Set(revealed.value)
-}
-
-function conceal(file: SearchFile): void {
-  // 已显示的图片: 点击分级角标重新设为模糊状态
-  revealed.value.delete(fileKey(file))
-  revealed.value = new Set(revealed.value)
-}
-
 function locked(file: SearchFile): boolean {
-  return isBlurred(file.rating) && !isRevealed(file)
+  return isBlurred(file.rating) && !isFileRevealed(file)
 }
 
 function showRatingBadge(file: SearchFile): boolean {
@@ -92,7 +80,7 @@ function onFileClick(event: MouseEvent, file: SearchFile): void {
     toggleSelection(fileKey(file))
     return
   }
-  if (locked(file)) return
+  // 模糊图片同样允许进入查看器, 由查看器以模糊状态展示
   void openViewer(file)
 }
 
@@ -119,7 +107,7 @@ watch(
   () => [store.path, store.inSearch] as const,
   () => {
     clearSelection()
-    revealed.value = new Set()
+    resetRevealedFiles()
     scrollEl.value?.scrollTo({ top: 0 })
   },
 )
@@ -229,15 +217,20 @@ function ratingBadge(rating: number): string {
                 <span class="badge lock-badge"
                       :style="{ background: RATING_COLORS[file.rating] }">{{ ratingBadge(file.rating) }}</span>
                 <span class="lock-text">已模糊处理该图像</span>
-                <button class="btn small" @click.stop="reveal(file)">显示</button>
+                <button class="btn small accent" @click.stop="revealFile(file)">显示</button>
               </div>
             </template>
             <template v-else>
               <img class="thumb-img" :src="thumbSrc(file)" loading="lazy"
                    :alt="file.name" @error="onThumbError(file)" />
-              <span v-if="showRatingBadge(file)" class="badge rating-badge clickable"
-                    title="点击重新模糊" @click.stop="conceal(file)"
-                    :style="{ background: RATING_COLORS[file.rating] }">{{ ratingBadge(file.rating) }}</span>
+              <div v-if="showRatingBadge(file)" class="badge-group">
+                <span class="badge rating-badge"
+                      :style="{ background: RATING_COLORS[file.rating] }">{{ ratingBadge(file.rating) }}</span>
+                <button v-if="isFileRevealed(file)" class="icon-btn small reblur-btn"
+                        title="重新模糊" @click.stop="concealFile(file)">
+                  <Icon name="preview-close" label="re-blur" />
+                </button>
+              </div>
             </template>
 
             <div class="hover-actions" @click.stop>
@@ -345,22 +338,41 @@ function ratingBadge(rating: number): string {
   background: #1b1b1b;
 }
 
-.rating-badge {
+.badge-group {
   position: absolute;
   left: 6px;
   top: 6px;
-  height: 20px;
-  padding: 0 7px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.rating-badge {
+  height: 26px;
+  padding: 0 9px;
   font-size: 12px;
-  line-height: 20px;
+  line-height: 26px;
   opacity: 0.92;
 }
 
-.rating-badge.clickable {
-  cursor: pointer;
+.reblur-btn {
+  width: 26px;
+  height: 26px;
+  background: var(--warn);
+  border-color: var(--warn);
+  color: #1a1a1a;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
 }
 
-.rating-badge.clickable:hover {
+.reblur-btn:hover {
+  background: #ffcb61;
+  border-color: #ffcb61;
+  color: #1a1a1a;
+}
+
+.reblur-btn .app-icon {
+  width: 17px;
+  height: 17px;
   opacity: 1;
 }
 
@@ -404,8 +416,7 @@ function ratingBadge(rating: number): string {
 .lock-icon {
   width: 44px;
   height: 44px;
-  opacity: 0.65;
-  color: var(--text-dim);
+  color: var(--warn);
 }
 
 .lock-badge {
