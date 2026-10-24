@@ -58,9 +58,10 @@ FastAPI 实现，启动入口 `main.py`。接口契约以 `construction/前端AP
 - **入库竞态**：新文件在写入完成后才计算 SHA256、探测分辨率并解析元数据；空文件不会入库，避免把 0 字节快照写成正式记录。
 - **文件夹上传**：前端按"扁平 / 树状"结构选择后进入等待上传阶段（树状模式展示目录层级与各文件大小），由用户确认后开始；树状模式逐级创建目录（冲突时选择合并或新建 `(N)`），并按目标目录分组调用 `prepare/execute`。
 - **分辨率**：入库时用 Pillow 独立探测图片宽高（与元数据解析无关），无生成元数据的图片也能得到分辨率；重新读取元数据时同样始终刷新分辨率与文件大小，解析不到生成参数时 `has_metadata` 为 `false`。
+- **采样器 / 调度器归一**：解析结果传出前统一为对照表中的最终记录名（如 `Euler a` / `euler_ancestral` → `Euler ancestral`，`DPM++ 2M Karras` 拆为 `DPMPP 2M` + `Karras`）；表外值保留原文。
 - **秒传**：`prepare` 时若同 SHA256 已有可读副本，后端直接复制并返回 `duplicate: true`（失败自动回退为真实上传）。
 - **分块上传**：按 `chunk_size`（10 MiB）切片；最后一块到达后合并、校验 SHA256、移动入库；返回 `status: success | fail`（失败附 `error` 字段），`saved_path` 为 `/gallery` 相对路径。
-- **配置**：键集合取自 `config_manager.DEFAULT_CONFIG`；尺寸类 64–1024、分级 0–4、`ShowLevel` 为 0–4 列表，非法值返回 400。
+- **配置**：键集合取自 `config_manager.DEFAULT_CONFIG`；尺寸类 64–1024、分级 0–4（`BlurLevel` 额外允许 `-1`=None）、`ShowLevel` 为 0–4 列表，非法值返回 400。
 - **数据库空闲合并**：`DatabaseIdleCheckpointMinutes` 为 0–1440 的整数（0=关闭），写入配置文件后需重启程序才会应用到数据库后台任务。
 - **模型归属**：模型按**文件**关联（file N—N checkpoint/lora/embedding/vae）。`images/models` 返回指定文件绑定的模型；`images/metadata/update` 中的模型数组只修改该文件；`images/model-names` 返回仍被文件引用的去重名称及 `file_count`。
 - **移动**：仅支持 `/gallery` 内；源侧操作固定作用于挂载实际位置；目标同名冲突返回 409；文件夹不得移入自身子树。

@@ -188,7 +188,7 @@ Genesis/
 | `AutoRefresh` | `true` | 目录内容变化时自动刷新 |
 | `ShowLevel` | `[0,1,2,3,4]` | 允许显示的图片等级 |
 | `SafeBrowsingMode` | `false` | 仅显示 G 级图片 |
-| `BlurLevel` | `2` | 开始模糊处理的等级（2=R） |
+| `BlurLevel` | `2` | 开始模糊处理的等级（`-1`=None 不模糊，0=G … 4=XXX，默认 2=R） |
 | `DatabaseIdleCheckpointMinutes` | `10` | 写空闲多少分钟后执行 WAL checkpoint（0=关闭，范围: 0–1440）；重启生效 |
 
 ---
