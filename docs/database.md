@@ -6,16 +6,23 @@
 
 | 文件 | 职责 |
 |---|---|
-| `creation.py` | 数据库创建：连接工厂、建表脚本与索引、根目录（ROOT）记录 |
+| `creation.py` | 数据库结构创建：建表脚本与索引、根目录（ROOT）记录 |
 | `upgrade.py` | 数据库升级：结构版本检查、`_MIGRATIONS` 逐版本迁移 |
-| `service.py` | 对外服务：全部查询语句、读写引擎（写线程 / 读线程池）与 `DataBase` 门面 |
+| `engine.py` | 连接工厂与管理：写线程、读连接池、WAL checkpoint、生命周期与任务派发 |
+| `service.py` | 对外门面 `DataBase`：只负责把方法派发到对应模块，不直接执行 SQL |
+| `search.py` | 文件搜索：结构化条件 → WHERE 与游标分页查询 |
+| `table/path.py` | path 表：目录树增删改查、完整逻辑路径解析 |
+| `table/info.py` | info 表：创建/查询/更新/删除、孤儿记录清理 |
+| `table/file.py` | file 表：文件记录增删改查与移动 |
+| `table/model.py` | 四张模型注册表与四张文件-模型中间表、模型反查 |
+| `table/__init__.py` | 表实现共享的时间戳工具与 `UNSET` 哨兵 |
 | `__init__.py` | 包入口，导出 `DataBase` / `DB_VERSION` / `init` / `close`（接口与旧版一致） |
 
 版本号唯一来源为项目根目录的 `version.py`：
 `PROGRAM_VERSION`（程序版本）与 `DATABASE_VERSION`（结构版本）。
 `upgrade.DB_VERSION` 直接引用 `DATABASE_VERSION`。
 
-## 并发架构（读/写分离）
+## 并发架构（读/写分离，`engine.py`）
 - 写侧：单个后台线程持有唯一写连接；外部经线程安全 FIFO 队列提交任务，
   调用方通过 Future 获取结果或异常。所有写操作使用显式事务包裹
   （BEGIN IMMEDIATE / COMMIT / ROLLBACK，事务粒度 = 一个业务操作，

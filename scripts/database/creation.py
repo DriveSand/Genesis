@@ -1,12 +1,11 @@
-"""database/creation.py —— 数据库创建。
+"""database/creation.py —— 数据库结构创建。
 
 职责:
-- SQLite 连接工厂 (统一 PRAGMA 设置);
 - 建表脚本与索引 (幂等);
 - 根目录记录 (ROOT) 的创建。
 
-本模块只负责"从无到有"的结构创建; 版本检查与升级见 upgrade.py,
-对外读写服务见 service.py。
+本模块只负责数据库结构的定义与创建, 不涉及连接管理:
+连接工厂见 engine.py, 版本检查与升级见 upgrade.py, 对外门面见 service.py。
 """
 import sqlite3
 import uuid as uuid_lib
@@ -152,27 +151,6 @@ CREATE INDEX IF NOT EXISTS idx_fv_vae ON file_vae(vae_id);
 # 建表脚本按 ";" 拆分为单条语句 (脚本内无嵌套分号) ,
 # 使整个建表过程可以纳入单个显式事务
 _SCHEMA_STATEMENTS = [s.strip() for s in _SCHEMA_SQL.split(";") if s.strip()]
-
-
-# ---------------------------------------------------------------- #
-# 连接工厂 (连接管理唯一入口)
-# ---------------------------------------------------------------- #
-
-def open_connection(db_path) -> sqlite3.Connection:
-    """创建新连接。每个连接创建时独立执行三条 PRAGMA。
-
-    isolation_level=None 关闭 sqlite3 的隐式事务管理,
-    写事务由 service._run_in_transaction 显式控制 BEGIN/COMMIT/ROLLBACK。
-    禁止 check_same_thread=False: 连接在哪个线程创建就只能在哪个线程使用
-    (写连接仅在写线程内创建; 读连接在各读线程内经 threading.local 创建) 。
-    """
-    conn = sqlite3.connect(db_path, isolation_level=None)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
-    conn.execute("PRAGMA foreign_keys = ON")
-    log.debug(f"Database connection opened: {db_path}")
-    return conn
 
 
 # ---------------------------------------------------------------- #
