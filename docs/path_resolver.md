@@ -4,7 +4,7 @@
 
 模块边界（硬性约束）：
 
-- 只处理 `/gallery` 的路径体系；`/gallery` 与 `/cache` 的根前缀分发由 `scripts/file_manager.py` 负责，本模块不感知 `/cache`。
+- 只处理 `/gallery` 的路径体系；`/gallery` 与 `/cache` 的根前缀分发由 `scripts/file_manager/path_utils.py` 负责，本模块不感知 `/cache`。
 - 除通过 `DataBase` 门面做只读查询外，**不做任何磁盘 I/O、不执行任何 SQL**。
 - 挂载配置由本类唯一持有；路径表节点的创建由 `config_manager` / `database` 完成，本模块不写数据库。
 

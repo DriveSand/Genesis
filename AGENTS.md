@@ -61,12 +61,12 @@ npm run dev
 
 ## 硬性模块边界
 
-- **`scripts/file_manager.py`** — 唯一执行文件 I/O 的模块。缩略图生成、上传、下载、路由均通过它。（`parser_scheduler` 有一个显式例外：后台任务中只读 `Image.open`）
+- **`scripts/file_manager/`** — 唯一执行文件 I/O 的模块包（门面 `manager.py`）。缩略图生成、上传、下载、路由均通过它。（`parser_scheduler` 有一个显式例外：后台任务中只读 `Image.open`）
 - **`scripts/path_resolver.py`** — 唯一负责逻辑路径与物理路径转换的模块。
 - **`scripts/database/`** — 唯一执行 SQL 的地方。其他模块通过 `DataBase` 门面调用。
 - **`scripts/config_manager.py`** — 唯一读写配置的入口。
 - **`scripts/parser_scheduler.py`** — 唯一元数据/EXIF 解析入口，唯一允许导入 `scripts/parsers/` 的模块。
-- `FileManager._db_lock`（RLock，与 `PathResolver` 共享）序列化文件层的所有 DB 访问。
+- `FileManager.db_lock`（RLock，与 `PathResolver` 共享）序列化文件层的所有 DB 访问。
 - 写操作提交到单写线程；读操作在 4 线程池运行（线程局部只读连接）；两者阻塞于一个 Future。**禁止自行创建 SQLite 连接或在线程间共享连接。**
 
 ## 路径约定（容易出错）
