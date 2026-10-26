@@ -1,7 +1,7 @@
-"""模型表与文件-模型关联: checkpoint / lora / embedding / vae。
+"""模型表与文件-模型关联: checkpoint / lora / embedding / vae / upscale。
 
-模型注册表 (model_*) 只保存模型自身; 文件与模型的关系由 file_checkpoint、
-file_lora、file_embedding、file_vae 四张中间表维护, LoRA 的权重存放在中间表。
+模型注册表只保存模型自身; 文件与模型的关系由 file_checkpoint、file_lora、
+file_embedding、file_vae、file_upscale 中间表维护, LoRA 的权重存放在中间表。
 """
 from __future__ import annotations
 
@@ -13,10 +13,11 @@ from scripts.logger import log
 
 # 模型种类 -> 模型表名 (表名白名单, 查询值一律走 ? 参数绑定)
 MODEL_TABLES = {
-    "checkpoint": "model_checkpoint",
-    "lora": "model_lora",
-    "embedding": "model_embedding",
-    "vae": "model_vae",
+    "checkpoint": "checkpoint",
+    "lora": "lora",
+    "embedding": "embedding",
+    "vae": "vae",
+    "upscale": "upscale",
 }
 
 # 模型种类 -> (中间表, 模型外键列); LoRA 中间表另有 weight 列
@@ -25,6 +26,7 @@ MODEL_JUNCTIONS = {
     "lora": ("file_lora", "lora_id"),
     "embedding": ("file_embedding", "embedding_id"),
     "vae": ("file_vae", "vae_id"),
+    "upscale": ("file_upscale", "upscale_id"),
 }
 
 LORA_MODEL_TYPES = (0, 1)  # 0=LoRA, 1=LyCORIS
@@ -141,14 +143,15 @@ def get_file_id(conn: sqlite3.Connection, path_uuid: str,
 def update_file_models(conn: sqlite3.Connection, path_uuid: str,
                        filename: str, checkpoints: list | None,
                        loras: list | None, embeddings: list | None,
-                       vaes: list | None) -> None:
+                       vaes: list | None, upscales: list | None = None) -> None:
     """整体修改某个文件使用的模型。
 
     参数为 None 表示该类模型保持不变; 传空列表表示清空该类。
     """
     file_id = get_file_id(conn, path_uuid, filename)
     for kind, rows in (("checkpoint", checkpoints), ("lora", loras),
-                       ("embedding", embeddings), ("vae", vaes)):
+                       ("embedding", embeddings), ("vae", vaes),
+                       ("upscale", upscales)):
         if rows is not None:
             sync_file_models(conn, file_id, kind, rows)
     log.debug(f"File models updated: file_id={file_id}")

@@ -21,20 +21,23 @@ import { RATING_COLORS, RATING_NAMES } from '../types'
 const rotation = ref(0)
 const zoom = ref(1)
 const zoomHintVisible = ref(false)
+const canvasEl = ref<HTMLElement | null>(null)
+const imageEl = ref<HTMLImageElement | null>(null)
 const MIN_ZOOM = 0.1
-// 最大放大 2000% 这下应该没有人说看不清细节了
-const MAX_ZOOM = 20
+// 最大放大 5000% 这下应该没有人说看不清细节了，像素点看的清清楚楚
+const MAX_ZOOM = 50
 const ZOOM_STEP = 0.25
 let zoomHintTimer: number | undefined
 
-// 滚轮缩放: 连续快速滚动时单步放大到 10%;
-// 保持快速滑动 3 秒后进一步放大到 50%; 停止后恢复 1%
 const WHEEL_STEP = 0.01
 const WHEEL_FAST_STEP = 0.1
 const WHEEL_ULTRA_STEP = 0.5
+// 连续滑动触发时间，单位 ms
 const WHEEL_RAPID_INTERVAL = 300
-const WHEEL_RESET_DELAY = 450
-const WHEEL_ULTRA_AFTER = 2000
+// 最大空闲时间，单位 ms
+const WHEEL_RESET_DELAY = 500
+// 连续快速滑动触发时间，单位 ms
+const WHEEL_ULTRA_AFTER = 1500
 let wheelLastAt = 0
 let wheelDirection = 0
 let wheelRapid = false
@@ -116,6 +119,9 @@ const modelRows = computed(() => {
   for (const item of m.vae) {
     rows.push({ name: item.model_name, version: item.version, url: item.model_url, kind: 'VAE' })
   }
+  for (const item of m.upscale) {
+    rows.push({ name: item.model_name, version: item.version, url: item.model_url, kind: 'Upscale' })
+  }
   return rows
 })
 
@@ -180,7 +186,7 @@ function onWheel(event: WheelEvent): void {
   wheelDirection = direction
   if (wheelResetTimer) window.clearTimeout(wheelResetTimer)
   wheelResetTimer = window.setTimeout(resetWheelRapid, WHEEL_RESET_DELAY)
-  // 快速滑动持续 2 秒后, 单步提升到 50%
+  // 快速滑动持续设置时间后, 单步提升到 50%
   const ultra = rapid && wheelRapidSince > 0
     && now - wheelRapidSince >= WHEEL_ULTRA_AFTER
   const step = ultra ? WHEEL_ULTRA_STEP
@@ -194,6 +200,31 @@ const panX = ref(0)
 const panY = ref(0)
 const dragging = ref(false)
 let dragState = { x: 0, y: 0, px: 0, py: 0, moved: false }
+
+/**
+ * 限制平移范围: 图片边缘最多贴到查看区边缘。
+ *
+ * 放大后在边缘继续缩小, 旧的平移量可能把图片完全推出查看区而无法拖回;
+ * 每次缩放/旋转/拖动后都按当前缩放与旋转后的包围盒重新夹取平移量。
+ */
+function clampPan(): void {
+  const image = imageEl.value
+  const canvas = canvasEl.value
+  if (!image || !canvas) return
+  const scale = zoom.value
+  const rad = rotation.value * Math.PI / 180
+  const sin = Math.abs(Math.sin(rad))
+  const cos = Math.abs(Math.cos(rad))
+  const width = image.clientWidth * scale
+  const height = image.clientHeight * scale
+  // 旋转后的轴对齐包围盒
+  const boundsW = width * cos + height * sin
+  const boundsH = width * sin + height * cos
+  const maxX = Math.max(0, (boundsW - canvas.clientWidth) / 2)
+  const maxY = Math.max(0, (boundsH - canvas.clientHeight) / 2)
+  panX.value = Math.max(-maxX, Math.min(maxX, panX.value))
+  panY.value = Math.max(-maxY, Math.min(maxY, panY.value))
+}
 
 function onImageMouseDown(event: MouseEvent): void {
   if (locked.value || zoom.value <= 1) return
@@ -214,6 +245,7 @@ function onWindowMouseMove(event: MouseEvent): void {
   }
   panX.value = dragState.px + dx
   panY.value = dragState.py + dy
+  clampPan()
 }
 
 function onWindowMouseUp(): void {
@@ -258,7 +290,13 @@ watch(zoom, (value) => {
   if (value <= 1) {
     panX.value = 0
     panY.value = 0
+  } else {
+    clampPan()
   }
+})
+
+watch(rotation, () => {
+  clampPan()
 })
 
 onMounted(() => {
@@ -277,14 +315,14 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="viewer">
-    <div class="canvas" @wheel.prevent="onWheel">
+    <div ref="canvasEl" class="canvas" @wheel.prevent="onWheel">
       <button class="nav-arrow left" title="上一张" @click="viewerStep(-1)">
         <Icon name="left" label="prev" />
       </button>
-      <img v-if="file" class="main-image"
+      <img v-if="file" ref="imageEl" class="main-image"
            :class="{ dragging, blurred: locked, locked }" :src="imageUrl" :alt="file.name"
            :style="{ transform: imageTransform }"
-           @mousedown="onImageMouseDown" @click="onImageClick" />
+           @load="clampPan" @mousedown="onImageMouseDown" @click="onImageClick" />
       <button class="nav-arrow right" title="下一张" @click="viewerStep(1)">
         <Icon name="right" label="next" />
       </button>

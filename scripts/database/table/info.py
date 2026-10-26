@@ -47,7 +47,8 @@ def create_info(conn: sqlite3.Connection, sha256: str,
                 rating: int, positive_prompt: str, negative_prompt: str,
                 note: str, files: list[dict[str, Any]] | None,
                 checkpoints: list | None, loras: list | None,
-                embeddings: list | None, vaes: list | None) -> int:
+                embeddings: list | None, vaes: list | None,
+                upscales: list | None = None) -> int:
     """新建 info 记录, 文件与模型记录在同一事务内写入, 返回 info_id。
 
     尺寸/大小属于单个文件, 由 files 元素以 width/height/file_size 提供。
@@ -83,7 +84,8 @@ def create_info(conn: sqlite3.Connection, sha256: str,
     file_ids = (insert_files(conn, info_id, files, timestamp)
                 if files else [])
     for kind, rows in (("checkpoint", checkpoints), ("lora", loras),
-                       ("embedding", embeddings), ("vae", vaes)):
+                       ("embedding", embeddings), ("vae", vaes),
+                       ("upscale", upscales)):
         if not rows:
             continue
         if not file_ids:

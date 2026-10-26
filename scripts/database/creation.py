@@ -72,7 +72,7 @@ CREATE INDEX IF NOT EXISTS idx_file_path ON file(path_uuid);
 CREATE INDEX IF NOT EXISTS idx_file_info ON file(info_id);
 
 -- 模型注册表: 同一 (name, version, url) 视为同一模型, 与文件解耦
-CREATE TABLE IF NOT EXISTS model_checkpoint (
+CREATE TABLE IF NOT EXISTS checkpoint (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     name    TEXT NOT NULL,
     version TEXT NOT NULL DEFAULT '',
@@ -80,9 +80,9 @@ CREATE TABLE IF NOT EXISTS model_checkpoint (
     UNIQUE(name, version, url)
 );
 
-CREATE INDEX IF NOT EXISTS idx_model_ckpt_name ON model_checkpoint(name);
+CREATE INDEX IF NOT EXISTS idx_model_ckpt_name ON checkpoint(name);
 
-CREATE TABLE IF NOT EXISTS model_lora (
+CREATE TABLE IF NOT EXISTS lora (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     model_type INTEGER NOT NULL CHECK(model_type IN (0,1)),
     name       TEXT NOT NULL,
@@ -91,9 +91,9 @@ CREATE TABLE IF NOT EXISTS model_lora (
     UNIQUE(model_type, name, version, url)
 );
 
-CREATE INDEX IF NOT EXISTS idx_model_lora_name ON model_lora(name);
+CREATE INDEX IF NOT EXISTS idx_model_lora_name ON lora(name);
 
-CREATE TABLE IF NOT EXISTS model_embedding (
+CREATE TABLE IF NOT EXISTS embedding (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     name    TEXT NOT NULL,
     version TEXT NOT NULL DEFAULT '',
@@ -101,9 +101,9 @@ CREATE TABLE IF NOT EXISTS model_embedding (
     UNIQUE(name, version, url)
 );
 
-CREATE INDEX IF NOT EXISTS idx_model_emb_name ON model_embedding(name);
+CREATE INDEX IF NOT EXISTS idx_model_emb_name ON embedding(name);
 
-CREATE TABLE IF NOT EXISTS model_vae (
+CREATE TABLE IF NOT EXISTS vae (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     name    TEXT NOT NULL,
     version TEXT NOT NULL DEFAULT '',
@@ -111,12 +111,22 @@ CREATE TABLE IF NOT EXISTS model_vae (
     UNIQUE(name, version, url)
 );
 
-CREATE INDEX IF NOT EXISTS idx_model_vae_name ON model_vae(name);
+CREATE INDEX IF NOT EXISTS idx_model_vae_name ON vae(name);
+
+CREATE TABLE IF NOT EXISTS upscale (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    name    TEXT NOT NULL,
+    version TEXT NOT NULL DEFAULT '',
+    url     TEXT NOT NULL DEFAULT '',
+    UNIQUE(name, version, url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_upscale_name ON upscale(name);
 
 -- 文件与模型的多对多中间表 (LoRA/LyCORIS 的权重属于文件-模型关系)
 CREATE TABLE IF NOT EXISTS file_checkpoint (
     file_id       INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
-    checkpoint_id INTEGER NOT NULL REFERENCES model_checkpoint(id) ON DELETE CASCADE,
+    checkpoint_id INTEGER NOT NULL REFERENCES checkpoint(id) ON DELETE CASCADE,
     PRIMARY KEY(file_id, checkpoint_id)
 );
 
@@ -124,7 +134,7 @@ CREATE INDEX IF NOT EXISTS idx_fc_checkpoint ON file_checkpoint(checkpoint_id);
 
 CREATE TABLE IF NOT EXISTS file_lora (
     file_id INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
-    lora_id INTEGER NOT NULL REFERENCES model_lora(id) ON DELETE CASCADE,
+    lora_id INTEGER NOT NULL REFERENCES lora(id) ON DELETE CASCADE,
     weight  REAL NOT NULL,
     PRIMARY KEY(file_id, lora_id)
 );
@@ -133,7 +143,7 @@ CREATE INDEX IF NOT EXISTS idx_fl_lora ON file_lora(lora_id);
 
 CREATE TABLE IF NOT EXISTS file_embedding (
     file_id      INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
-    embedding_id INTEGER NOT NULL REFERENCES model_embedding(id) ON DELETE CASCADE,
+    embedding_id INTEGER NOT NULL REFERENCES embedding(id) ON DELETE CASCADE,
     PRIMARY KEY(file_id, embedding_id)
 );
 
@@ -141,11 +151,19 @@ CREATE INDEX IF NOT EXISTS idx_fe_embedding ON file_embedding(embedding_id);
 
 CREATE TABLE IF NOT EXISTS file_vae (
     file_id INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
-    vae_id  INTEGER NOT NULL REFERENCES model_vae(id) ON DELETE CASCADE,
+    vae_id  INTEGER NOT NULL REFERENCES vae(id) ON DELETE CASCADE,
     PRIMARY KEY(file_id, vae_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_fv_vae ON file_vae(vae_id);
+
+CREATE TABLE IF NOT EXISTS file_upscale (
+    file_id    INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    upscale_id INTEGER NOT NULL REFERENCES upscale(id) ON DELETE CASCADE,
+    PRIMARY KEY(file_id, upscale_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fu_upscale ON file_upscale(upscale_id);
 """
 
 # 建表脚本按 ";" 拆分为单条语句 (脚本内无嵌套分号) ,

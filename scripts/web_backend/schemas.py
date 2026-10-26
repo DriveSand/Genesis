@@ -133,6 +133,7 @@ class MetadataChange(BaseModel):
     lora: list[ModelEntry] | None = None
     embedding: list[ModelEntry] | None = None
     vae: list[ModelEntry] | None = None
+    upscale: list[ModelEntry] | None = None
 
 
 class MetadataUpdateRequest(BaseModel):

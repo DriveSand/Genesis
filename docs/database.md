@@ -14,7 +14,7 @@
 | `table/path.py` | path 表：目录树增删改查、完整逻辑路径解析 |
 | `table/info.py` | info 表：创建/查询/更新/删除、孤儿记录清理 |
 | `table/file.py` | file 表：文件记录增删改查与移动 |
-| `table/model.py` | 四张模型注册表与四张文件-模型中间表、模型反查 |
+| `table/model.py` | 五张模型注册表与五张文件-模型中间表、模型反查 |
 | `table/__init__.py` | 表实现共享的时间戳工具与 `UNSET` 哨兵 |
 | `__init__.py` | 包入口，导出 `DataBase` / `DB_VERSION` / `init` / `close`（接口与旧版一致） |
 
@@ -57,22 +57,24 @@
   同一内容的多份副本各自记录
 - `path`：逻辑目录表
 - 模型关系为 **info 1—N file**、**file N—N 模型**：
-  - `model_checkpoint` / `model_lora` / `model_embedding` / `model_vae`
-    为模型注册表，**不再保存 info_id / file_id**；
-  - `file_checkpoint` / `file_lora` / `file_embedding` / `file_vae`
-    为中间表；LoRA/LyCORIS 的 `weight` 存放于 `file_lora.weight`；
-  - 唯一键（去除首尾空格后）：checkpoint / embedding / vae 为
+  - `checkpoint` / `lora` / `embedding` / `vae` / `upscale`
+    为模型注册表，**不保存 info_id / file_id**；
+  - `file_checkpoint` / `file_lora` / `file_embedding` / `file_vae` /
+    `file_upscale` 为中间表；LoRA/LyCORIS 的 `weight` 存放于 `file_lora.weight`；
+  - 唯一键（去除首尾空格后）：checkpoint / embedding / vae / upscale 为
     `name + version + url`；lora 另加 `model_type`。
 - 文件重命名/移动采用原地更新，保留 `file.id` 与模型关联；目录移动只更新
   目录节点的 parent_uuid/name，子树文件与关联保持不变。
 
 ## 数据库版本与升级
-- 版本号存于 SQLite 内置的 `PRAGMA user_version`；当前结构版本为 `DB_VERSION = 2`。
+- 版本号存于 SQLite 内置的 `PRAGMA user_version`；当前结构版本为 `DB_VERSION = 3`。
 - 期望版本来自项目根目录的 `version.py` 的 `DATABASE_VERSION`。启动时：
   - 库版本 < 期望：按 `_MIGRATIONS` 逐版本升级
     （v0→v1 把 info 的 width/height/file_size 迁移到 file 表；
     v1→v2 引入 file.id、模型注册表与四张 file_* 中间表，并把旧 info 级
-    模型复制到该 info 的所有文件，LoRA weight 迁入中间表）
+    模型复制到该 info 的所有文件，LoRA weight 迁入中间表；
+    v2→v3 将 `model_checkpoint/lora/embedding/vae` 重命名为
+    `checkpoint/lora/embedding/vae`，并新增 `upscale` 与 `file_upscale`）
   - 库版本 > 期望：抛 `DatabaseVersionError`（42113），程序拒绝启动
   - 旧程序创建的库 `user_version` 为 0，自动从 v0 逐版本迁移
 - **迁移前备份**：先执行 `PRAGMA wal_checkpoint(TRUNCATE)` 回写 WAL，

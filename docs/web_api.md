@@ -16,7 +16,7 @@ FastAPI 实现，启动入口 `main.py`。接口契约以 `construction/前端AP
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/v1/status` | 服务状态（`read_only`、`enable_thumbnail`） |
-| GET | `/api/v1/images/models` | 图片使用的模型（checkpoint/lora/embedding/vae） |
+| GET | `/api/v1/images/models` | 图片使用的模型（checkpoint/lora/embedding/vae/upscale） |
 | GET | `/api/v1/images/metadata` | 图片生成信息 |
 | POST | `/api/v1/images/metadata/update` | 修改元数据（仅改数据库） |
 | POST | `/api/v1/images/metadata/refresh?image_path=` | 重新解析图片元数据并写回数据库；分辨率/文件大小总刷新，响应含 `has_metadata`（补充端点） |
@@ -63,5 +63,5 @@ FastAPI 实现，启动入口 `main.py`。接口契约以 `construction/前端AP
 - **分块上传**：按 `chunk_size`（10 MiB）切片；最后一块到达后合并、校验 SHA256、移动入库；返回 `status: success | fail`（失败附 `error` 字段），`saved_path` 为 `/gallery` 相对路径。
 - **配置**：键集合取自 `config_manager.DEFAULT_CONFIG`；尺寸类 64–1024、分级 0–4（`BlurLevel` 额外允许 `-1`=None）、`ShowLevel` 为 0–4 列表，非法值返回 400。
 - **数据库空闲合并**：`DatabaseIdleCheckpointMinutes` 为 0–1440 的整数（0=关闭），写入配置文件后需重启程序才会应用到数据库后台任务。
-- **模型归属**：模型按**文件**关联（file N—N checkpoint/lora/embedding/vae）。`images/models` 返回指定文件绑定的模型；`images/metadata/update` 中的模型数组只修改该文件；`images/model-names` 返回仍被文件引用的去重名称及 `file_count`。
+- **模型归属**：模型按**文件**关联（file N—N checkpoint/lora/embedding/vae/upscale）。`images/models` 返回指定文件绑定的模型；`images/metadata/update` 中的模型数组只修改该文件；`images/model-names` 返回仍被文件引用的去重名称及 `file_count`。`kind` 可取 `checkpoint` / `lora` / `embedding` / `vae` / `upscale`。
 - **移动**：仅支持 `/gallery` 内；源侧操作固定作用于挂载实际位置；目标同名冲突返回 409；文件夹不得移入自身子树。

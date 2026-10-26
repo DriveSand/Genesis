@@ -28,7 +28,7 @@ interface EditModel {
   weight: number | null
 }
 
-const MODEL_KINDS = ['Checkpoint', 'LoRA', 'LyCORIS', 'Embedding', 'VAE'] as const
+const MODEL_KINDS = ['Checkpoint', 'LoRA', 'LyCORIS', 'Embedding', 'VAE', 'Upscale'] as const
 
 const loading = ref(true)
 const saving = ref(false)
@@ -113,6 +113,7 @@ onMounted(async () => {
       })),
       ...toEditModels('Embedding', grouped.embedding),
       ...toEditModels('VAE', grouped.vae),
+      ...toEditModels('Upscale', grouped.upscale),
     ]
     origModels.value = serialiseModels(models.value)
   } catch (err) {
@@ -169,7 +170,12 @@ function serialiseModels(rows: EditModel[]): Record<string, unknown[]> {
     .map((m) => ({ model_name: m.name, version: m.version, model_url: m.url || null }))
   const vaes = rows.filter((m) => m.kind === 'VAE')
     .map((m) => ({ model_name: m.name, version: m.version, model_url: m.url || null }))
-  return { checkpoint: checkpoints, lora: loras, embedding: embeddings, vae: vaes }
+  const upscales = rows.filter((m) => m.kind === 'Upscale')
+    .map((m) => ({ model_name: m.name, version: m.version, model_url: m.url || null }))
+  return {
+    checkpoint: checkpoints, lora: loras, embedding: embeddings, vae: vaes,
+    upscale: upscales,
+  }
 }
 
 function buildChange(): Record<string, unknown> | null {
@@ -205,8 +211,9 @@ function buildChange(): Record<string, unknown> | null {
     lora: origModels.value.lora,
     embedding: origModels.value.embedding,
     vae: origModels.value.vae,
+    upscale: origModels.value.upscale,
   }
-  for (const key of ['checkpoint', 'lora', 'embedding', 'vae'] as const) {
+  for (const key of ['checkpoint', 'lora', 'embedding', 'vae', 'upscale'] as const) {
     if (JSON.stringify(current[key]) !== JSON.stringify(beforeModels[key])) {
       change[key] = current[key]
     }
@@ -214,7 +221,9 @@ function buildChange(): Record<string, unknown> | null {
   return change
 }
 
-const origModels = ref<Record<string, unknown[]>>({ checkpoint: [], lora: [], embedding: [], vae: [] })
+const origModels = ref<Record<string, unknown[]>>({
+  checkpoint: [], lora: [], embedding: [], vae: [], upscale: [],
+})
 
 async function save(): Promise<void> {
   const file = editTarget.value

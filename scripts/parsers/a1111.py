@@ -158,6 +158,7 @@ def parse(raw: "RawMetadata") -> dict[str, Any]:
             "loras": loras,
             "embeddings": [],   # infotext 无法区分 embedding, 不猜测
             "vaes": vaes,
+            "upscales": [],
         },
     }
 

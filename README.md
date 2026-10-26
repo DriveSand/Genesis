@@ -50,7 +50,7 @@
 - **目录模式搜索（仅基本搜索有效）**：`$p:"/123"`（根目录下）、`$p:"*/123"`（任意层级）、`$p:"/123/*"`（含子目录）；可连写多个引号模式取 OR
 - **灵活上传**：支持拖拽、文件 / 文件夹选择，文件夹可按扁平或树状上传，同名目录可合并或自动新建
 - **完整文件操作**：重命名、移动、删除，多选批量下载
-- **元数据编辑**：编辑提示词、生成参数、分级、备注及模型信息（Checkpoint / LoRA / LyCORIS / Embedding / VAE，LoRA 可单独设置权重）
+- **元数据编辑**：编辑提示词、生成参数、分级、备注及模型信息（Checkpoint / LoRA / LyCORIS / Embedding / VAE / Upscale，LoRA 可单独设置权重）
 
 ### 系统与数据
 
@@ -72,7 +72,7 @@
 > - **A1111 家族**：通过 PNG 文本块 `parameters` 或 JPEG / WEBP 的 EXIF `UserComment` 读取提示词与参数
 > - **LibLibAI**：额外支持 PNG 的 `AIGC` 块
 > - **Civitai**：存储格式可能随平台更新而变化；解析失败时图片仍会正常入库，仅缺少生成参数
-> - **ComfyUI**：读取 PNG 内置的 `prompt` / `workflow` 工作流，从保存节点回溯采样器，提取提示词、采样参数、Checkpoint、VAE 与 LoRA；支持 easy-use（`easy promptConcat` / `easy loraStack`）、LoraManager （`Lora Loader (LoraManager)`）节点。图片同时带有 A1111 infotext 时按 **ComfyUI** 解析，缺失字段再由 infotext 补齐；过于复杂或包含未知自定义节点的工作流可能只能提取部分参数
+> - **ComfyUI**：读取 PNG 内置的 `prompt` / `workflow` 工作流，从保存节点回溯采样器，提取提示词、采样参数、Checkpoint、VAE、LoRA 与 Upscale 模型；自定义节点采用独立模块解析，具体详情见[/docs/SUPPORT_PARSE_CUSTOM_NODES](https://github.com/DriveSand/Genesis/blob/main/docs/SUPPORT_PARSE_CUSTOM_NODES.md)。图片同时带有 A1111 infotext 时按 **ComfyUI** 解析，缺失字段再由 infotext 补齐；过于复杂或包含未知自定义节点的工作流可能只能提取部分参数
 > - 无法解析生成参数的图片仍会入库，但只能获取分辨率与文件大小
 
 ---

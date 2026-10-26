@@ -51,6 +51,7 @@ export interface ModelsResponse {
   lora: ModelLora[]
   embedding: ModelSimple[]
   vae: ModelSimple[]
+  upscale: ModelSimple[]
 }
 
 export interface ImageMetadata {

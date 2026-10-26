@@ -126,6 +126,7 @@ class DataBase:
         loras: list[dict[str, Any] | str] | None = None,
         embeddings: list[dict[str, Any] | str] | None = None,
         vaes: list[dict[str, Any] | str] | None = None,
+        upscales: list[dict[str, Any] | str] | None = None,
     ) -> int:
         """新建 info 记录, 可在同一事务内附带文件与模型记录, 返回 info_id。
 
@@ -138,7 +139,8 @@ class DataBase:
         return submit_write(
             info_table.create_info, sha256, seed, steps,
             cfg, sampler, scheduler, tool, rating, positive_prompt,
-            negative_prompt, note, files, checkpoints, loras, embeddings, vaes,
+            negative_prompt, note, files, checkpoints, loras, embeddings,
+            vaes, upscales,
         )
 
     def get_info(self, info_id: int) -> dict[str, Any] | None:
@@ -211,7 +213,9 @@ class DataBase:
                            checkpoints: list[dict[str, Any] | str] | None = None,
                            loras: list[dict[str, Any] | str] | None = None,
                            embeddings: list[dict[str, Any] | str] | None = None,
-                           vaes: list[dict[str, Any] | str] | None = None) -> None:
+                           vaes: list[dict[str, Any] | str] | None = None,
+                           upscales: list[dict[str, Any] | str] | None = None
+                           ) -> None:
         """整体修改某个文件使用的模型 (同一事务)
 
         参数为 None 表示该类模型保持不变; 传空列表表示清空该类。
@@ -219,7 +223,7 @@ class DataBase:
         已存在则复用模型注册表记录, 否则新建。
         """
         submit_write(model_table.update_file_models, path_uuid, filename,
-                     checkpoints, loras, embeddings, vaes)
+                     checkpoints, loras, embeddings, vaes, upscales)
 
     def get_file_models(self, path_uuid: str,
                         filename: str) -> dict[str, list[dict[str, Any]]]:

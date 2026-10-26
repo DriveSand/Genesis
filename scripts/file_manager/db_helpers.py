@@ -181,6 +181,7 @@ class DbHelper:
                         loras=models.get("loras"),
                         embeddings=models.get("embeddings"),
                         vaes=models.get("vaes"),
+                        upscales=models.get("upscales"),
                     )
             except Exception as e:  # noqa: BLE001
                 log.warning(f"Failed to write model bindings: {physical} ({e})")

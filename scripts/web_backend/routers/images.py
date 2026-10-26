@@ -40,7 +40,7 @@ def _lora_models(rows: list[dict]) -> list[dict]:
 def model_names(request: Request, kind: str, limit: int = 500) -> dict:
     """某种模型在图库中出现过的去重名称 (供编辑界面联想) 。"""
     state = request.app.state.genesis
-    if kind not in ("checkpoint", "lora", "embedding", "vae"):
+    if kind not in ("checkpoint", "lora", "embedding", "vae", "upscale"):
         raise InputDataError(f"Invalid model kind: {kind}")
     rows = state.db.list_model_names(kind)
     return {"kind": kind,
@@ -49,7 +49,7 @@ def model_names(request: Request, kind: str, limit: int = 500) -> dict:
 
 @router.get("/models")
 def models(request: Request, image_path: str) -> dict:
-    """获取图片使用的模型 (checkpoint / lora / embedding / vae) 。"""
+    """获取图片使用的模型 (checkpoint / lora / embedding / vae / upscale) 。"""
     state = request.app.state.genesis
     loc = locate_file(state, image_path)
     grouped = state.db.get_file_models(loc["path_uuid"], loc["filename"])
@@ -58,6 +58,7 @@ def models(request: Request, image_path: str) -> dict:
         "lora": _lora_models(grouped.get("lora", [])),
         "embedding": _simple_models(grouped.get("embedding", [])),
         "vae": _simple_models(grouped.get("vae", [])),
+        "upscale": _simple_models(grouped.get("upscale", [])),
     }
 
 
@@ -145,6 +146,10 @@ def update_metadata(request: Request, body: MetadataUpdateRequest) -> dict:
         model_updates["vaes"] = [
             {"name": m["model_name"], "version": m.get("version", ""),
              "url": m.get("model_url")} for m in change["vae"]]
+    if change.get("upscale") is not None:
+        model_updates["upscales"] = [
+            {"name": m["model_name"], "version": m.get("version", ""),
+             "url": m.get("model_url")} for m in change["upscale"]]
     if change.get("lora") is not None:
         loras = []
         for m in change["lora"]:
