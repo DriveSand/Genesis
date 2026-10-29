@@ -61,6 +61,25 @@ def move(request: Request, body: MoveRequest) -> dict:
     return {"results": results}
 
 
+@router.post("/copy")
+def copy(request: Request, body: MoveRequest) -> dict:
+    """批量复制文件/文件夹到目标目录 (仅 /gallery)。"""
+    state = request.app.state.genesis
+    results = []
+    for item in body.content:
+        try:
+            new_full = state.fm.copy_entry(
+                gallery_full(item.source_path), item.name,
+                gallery_full(item.target_path),
+                is_dir=(item.type == "folder"),
+                destination=item.destination or _SOURCE_DESTINATION)
+            results.append({"name": item.name, "path": item.source_path,
+                            "ok": True, "new_path": rel_of(new_full)})
+        except FileManagerError as exc:
+            results.append(_fail(item.name, item.source_path, exc))
+    return {"results": results}
+
+
 @router.post("/rename")
 def rename(request: Request, body: RenameRequest) -> dict:
     """重命名文件/文件夹。"""

@@ -23,19 +23,23 @@
 `upgrade.DB_VERSION` 直接引用 `DATABASE_VERSION`。
 
 ## 并发架构（读/写分离，`engine.py`）
-- 写侧：单个后台线程持有唯一写连接；外部经线程安全 FIFO 队列提交任务，
-  调用方通过 Future 获取结果或异常。所有写操作使用显式事务包裹
+- 写侧：单个后台线程持有唯一写连接；外部经优先级队列提交任务，
+  调用方通过 Future 获取结果或异常。Web 请求的写任务优先于后台任务
+  （入库、启动对账、缩略图元数据解析等）。所有写操作使用显式事务包裹
   （BEGIN IMMEDIATE / COMMIT / ROLLBACK，事务粒度 = 一个业务操作，
   多表写入在同一事务内）；事务内的"先查后改"一律使用写连接。
-- 读侧：ThreadPoolExecutor(max_workers=4)，每个工作线程经
-  threading.local() 独享一个只读连接，并发执行、无排队；
+- 读侧：4 个固定工作线程，每个线程经 threading.local() 独享一个只读连接；
+  同样使用优先级队列，Web 请求的查询先于后台查询执行。
   读操作不开启显式事务，且连接以 PRAGMA query_only 强制只读。
+- Web 请求通过 ASGI 中间件把数据库任务标记为交互优先（contextvars，
+  可传递到 FastAPI 的同步工作线程）。
 - 禁止 check_same_thread=False，禁止跨线程共享连接对象。
 - 每个连接创建时独立执行：
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
     PRAGMA foreign_keys = ON;
-- 关闭：close() 等待写队列清空、所有进行中任务完成后再关闭连接。
+- 关闭：close() 等待写队列中已提交的写事务完成；排队中的读请求直接取消，
+  仅等待执行中的读完成后关闭全部连接。
 
 ## 事务与查询约定
 - 全部使用参数化查询; SQL 中的表名只来自模块内置白名单，不接受外部输入

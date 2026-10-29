@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import os
+import shutil
 import uuid as uuid_lib
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
@@ -240,7 +241,6 @@ class FileOperations:
                    is_dir: bool = False,
                    destination: Literal["mount", "local"] | None = None) -> str:
         """跨目录移动文件/文件夹 (仅 /gallery), 返回新逻辑路径。"""
-        import shutil
         mgr = self._mgr
         validate_name(name)
         src_kind, src_segments = split_logical_path(source_parent)
@@ -307,6 +307,169 @@ class FileOperations:
     # ------------------------------------------------------------------ #
     # 查询 / 读写
     # ------------------------------------------------------------------ #
+
+    # ------------------------------------------------------------------ #
+    # 复制
+    # ------------------------------------------------------------------ #
+
+    def copy_entry(self, source_parent: str, name: str, target_parent: str,
+                   is_dir: bool = False,
+                   destination: Literal["mount", "local"] | None = None) -> str:
+        """复制文件/文件夹到另一目录 (仅 /gallery), 返回新逻辑路径。"""
+        mgr = self._mgr
+        validate_name(name)
+        src_kind, src_segments = split_logical_path(source_parent)
+        dst_kind, dst_segments = split_logical_path(target_parent)
+        if src_kind != "gallery" or dst_kind != "gallery":
+            raise CrossRootError(
+                f"Copy is only supported within /gallery: "
+                f"{source_parent} -> {target_parent}")
+        if is_dir and dst_segments[:len(src_segments) + 1] == src_segments + [name]:
+            raise InvalidPathError(
+                f"Cannot copy a folder into its own subtree: {target_parent}")
+
+        label = "Folder" if is_dir else "File"
+        src_lp = join_logical_path("gallery", src_segments + [name])
+        src_parent_phys, src_parent_uuid, _ = mgr.resolve_parent(
+            src_kind, src_segments, "mount")
+        dst_parent_phys, dst_parent_uuid, dst_parent_lp = mgr.resolve_parent(
+            dst_kind, dst_segments, destination, guard=True)
+
+        src = os.path.join(src_parent_phys, name)
+        dst = os.path.join(dst_parent_phys, name)
+        entry_exists = os.path.isdir if is_dir else os.path.isfile
+        if not entry_exists(src):
+            raise FMFileNotFound(f"{label} not found: {src_lp}")
+        if os.path.exists(dst):
+            raise NameConflictError(
+                f"{label} already exists: {dst_parent_lp}/{name}")
+
+        new_segments = dst_segments + [name]
+        new_lp = join_logical_path("gallery", new_segments)
+        os.makedirs(dst_parent_phys, exist_ok=True)
+
+        if is_dir:
+            mgr.whitelist.mark(dst, OpType.CREATE_DIR)
+            dst_uuid: str | None = None
+            try:
+                with mgr.db_lock:
+                    src_row = mgr.db_helper.get_child(src_parent_uuid, name)
+                if src_row is None:
+                    raise PathNotFoundError(
+                        f"Logical path not found: {src_lp}")
+                os.makedirs(dst)
+                with mgr.db_lock:
+                    dst_uuid = mgr.db.add_path(
+                        name, path_type="inbuilt", parent_uuid=dst_parent_uuid,
+                        path_uuid=str(uuid_lib.uuid4()))
+                self._copy_folder_children(
+                    src_row["uuid"], src_segments + [name], dst_uuid,
+                    new_segments, destination)
+            except Exception:
+                # 尽力回滚: 删除已创建的磁盘与数据库子树
+                if dst_uuid is not None:
+                    with mgr.db_lock:
+                        try:
+                            mgr.db_helper.remove_dir_records(dst_uuid)
+                        except Exception:  # noqa: BLE001
+                            pass
+                try:
+                    rmtree(dst)
+                except OSError:
+                    pass
+                raise
+            mgr.readonly.build()
+        else:
+            mgr.whitelist.mark(dst, OpType.CREATE_FILE)
+            try:
+                shutil.copy2(src, dst)
+                self._copy_file_record(
+                    src_parent_uuid, name, dst_parent_uuid, name,
+                    dst_segments, destination)
+            except Exception:
+                try:
+                    os.remove(dst)
+                except OSError:
+                    pass
+                raise
+            mgr.readonly.cache[new_lp] = mgr.readonly.cache.get(
+                join_logical_path("gallery", dst_segments), False)
+        log.info(f"{label} copied: {src_lp} -> {new_lp}")
+        return new_lp
+
+    def _copy_folder_children(self, src_uuid: str, src_segments: list[str],
+                              dst_uuid: str, dst_segments: list[str],
+                              destination: Literal["mount", "local"] | None) -> None:
+        mgr = self._mgr
+        with mgr.db_lock:
+            files = mgr.db.list_files_by_path(src_uuid)
+            dirs = mgr.db.list_paths(src_uuid)
+        src_dir_phys = mgr.resolver.segments_to_physical(src_segments)
+        dst_dir_phys = mgr.resolver.segments_to_physical(
+            dst_segments, destination)
+
+        for row in files:
+            filename = row["filename"]
+            src = os.path.join(src_dir_phys, filename)
+            dst = os.path.join(dst_dir_phys, filename)
+            mgr.whitelist.mark(dst, OpType.CREATE_FILE)
+            try:
+                shutil.copy2(src, dst)
+            except OSError as e:
+                raise FileManagerError(
+                    f"Failed to copy file: {src_segments}/{filename} ({e})") from e
+            self._copy_file_record(
+                src_uuid, filename, dst_uuid, filename,
+                dst_segments, destination)
+
+        for child in dirs:
+            child_name = child["name"]
+            child_src_segments = src_segments + [child_name]
+            child_dst_segments = dst_segments + [child_name]
+            child_phys = mgr.resolver.segments_to_physical(
+                child_dst_segments, destination)
+            mgr.whitelist.mark(child_phys, OpType.CREATE_DIR)
+            os.makedirs(child_phys)
+            with mgr.db_lock:
+                child_uuid = mgr.db.add_path(
+                    child_name, path_type="inbuilt", parent_uuid=dst_uuid,
+                    path_uuid=str(uuid_lib.uuid4()))
+            self._copy_folder_children(
+                child["uuid"], child_src_segments, child_uuid,
+                child_dst_segments, destination)
+
+    def _copy_file_record(self, src_parent_uuid: str, src_name: str,
+                          dst_parent_uuid: str, dst_name: str,
+                          dst_segments: list[str],
+                          destination: Literal["mount", "local"] | None) -> None:
+        """复制文件记录与文件-模型关联; 无记录时按新增文件入库。"""
+        mgr = self._mgr
+        with mgr.db_lock:
+            row = mgr.db_helper.get_file_row(src_parent_uuid, src_name)
+            if row is not None:
+                models = mgr.db.get_file_models(src_parent_uuid, src_name)
+                mgr.db.add_file(
+                    int(row["info_id"]), dst_parent_uuid, dst_name,
+                    str(row.get("mime_type") or guess_mime(dst_name)),
+                    width=int(row.get("width") or 0),
+                    height=int(row.get("height") or 0),
+                    file_size=int(row.get("file_size") or 0))
+                try:
+                    mgr.db.update_file_models(
+                        dst_parent_uuid, dst_name,
+                        checkpoints=models.get("checkpoint"),
+                        loras=models.get("lora"),
+                        embeddings=models.get("embedding"),
+                        vaes=models.get("vae"),
+                        upscales=models.get("upscale"))
+                except Exception:
+                    mgr.db.delete_file(dst_parent_uuid, dst_name)
+                    raise
+                return
+        # 源文件尚无数据库记录: 物理复制完成后按新增文件异步入库
+        physical = mgr.resolver.segments_to_physical(
+            dst_segments + [dst_name], destination)
+        mgr.sha.run(self.ingest_file_task, dst_parent_uuid, dst_name, physical)
 
     def entry_stat(self, parent_path: str,
                    name: str) -> dict[str, Any] | None:
@@ -473,6 +636,44 @@ class FileOperations:
                                      meta, physical)
         log.info(f"Metadata reparsed: {parent_path}/{filename}")
         return meta
+
+    def reparse_folder_metadata(self, folder_path: str,
+                                recursive: bool = False) -> dict[str, int]:
+        """重新读取文件夹内全部图片的元数据, 返回统计结果。"""
+        mgr = self._mgr
+        kind, segments = split_logical_path(folder_path)
+        if kind != "gallery":
+            raise CrossRootError(
+                f"Metadata can only be parsed under /gallery: {folder_path}")
+        if mgr.parse_metadata is None:
+            raise FileManagerError("Metadata parser is not available")
+
+        targets: list[tuple[str, str]] = []
+        with mgr.db_lock:
+            folder_uuid, _ = mgr.resolver.walk_segments(segments)
+
+            def collect(dir_uuid: str, dir_segments: list[str]) -> None:
+                for row in mgr.db.list_files_by_path(dir_uuid):
+                    targets.append((join_logical_path("gallery", dir_segments),
+                                    row["filename"]))
+                if recursive:
+                    for child in mgr.db.list_paths(dir_uuid):
+                        collect(child["uuid"], dir_segments + [child["name"]])
+
+            collect(folder_uuid, segments)
+
+        updated = 0
+        failed = 0
+        for parent, filename in targets:
+            try:
+                self.reparse_metadata(parent, filename)
+                updated += 1
+            except Exception as e:  # noqa: BLE001 单个文件失败不影响其余文件
+                failed += 1
+                log.warning(f"Metadata reparse failed: {parent}/{filename} ({e})")
+        log.info(f"Folder metadata reparsed: {folder_path} "
+                 f"(recursive={recursive}, updated={updated}, failed={failed})")
+        return {"files": len(targets), "updated": updated, "failed": failed}
 
     def reregister_subtree(self, physical_dir: str,
                            segments: list[str]) -> str:

@@ -7,20 +7,24 @@
 缩放规则: 等比缩放使短边等于 ThumbnailShortSideSize, 长边按比例计算;
 若原图短边已小于等于目标值, 不放大, 按原尺寸转存 WebP。
 
-线程模型: 生成在独立线程池中异步执行 (默认最多 2 个生成线程) ; 任务队列
-按 (SHA256|源路径, 短边长度, overwrite) 去重, 队列中/执行中的重复提交直接
-忽略 (返回 False) ; 队列线程安全, 提交接口可从任意线程调用。
-单个任务失败只回调错误, 不影响其他任务与线程存活; 回调异常被隔离。
+线程模型: 生成在独立工作线程中异步执行 (默认最多 2 个生成线程) ; 任务按
+(SHA256|源路径, 短边长度, overwrite) 去重, 队列中/执行中的重复提交直接忽略
+(返回 False) 。任务分为交互 (前端按需请求) 与批量 (预生成) 两级, 交互任务
+优先执行; 同 SHA256 的批量任务在用户请求时会提升到交互队列, 避免浏览被
+大量积压任务拖慢。队列线程安全, 提交接口可从任意线程调用。
+单个任务失败只回调错误/设置 Future 异常, 不影响其他任务与线程存活。
 
 约束: 严禁绕过 FileManager 直接读写文件; 严禁直接读配置; 不引入
 Pillow 之外的第三方依赖。
 """
 import hashlib
 import io
+import queue
 import threading
-from concurrent.futures import Future, ThreadPoolExecutor
+from collections import OrderedDict
+from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable
 
 from PIL import Image
 from PIL import UnidentifiedImageError
@@ -32,6 +36,10 @@ from scripts.sha256 import normalize_sha256
 
 # 成功回调参数: 缩略图逻辑路径 (如 "/cache/image/{sha}/512.webp") ; 失败时为 None
 ThumbCallback = Callable[[str | None, str | None], None]
+
+# 任务优先级: 前端按需请求优先于批量预生成, 避免大量积压拖慢浏览
+PRIORITY_INTERACTIVE = 0
+PRIORITY_BULK = 1
 
 
 @dataclass(frozen=True)
@@ -71,18 +79,27 @@ class ThumbnailGenerator:
         self._fm = file_manager
         self._resolver = path_resolver
         self._config = config_manager
-        self._executor = ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix="thumbnail")
+        # 两级任务队列 + 固定工作线程: 交互任务优先于批量任务
+        self._cond = threading.Condition()
+        self._high: queue.Queue[_Task] = queue.Queue()
+        self._bulk: OrderedDict[tuple, _Task] = OrderedDict()
         self._inflight: dict[tuple, Future] = {}   # 任务键 -> Future
-        self._lock = threading.Lock()
         self._shutting_down = False
+        self._workers = [
+            threading.Thread(target=self._loop, name=f"thumbnail-{index}",
+                             daemon=True)
+            for index in range(max(1, int(max_workers)))
+        ]
+        for worker in self._workers:
+            worker.start()
 
     # ---------------------------------------------------------------- #
     # 提交入口 (可从任意线程调用)
     # ---------------------------------------------------------------- #
 
     def submit_by_sha(self, sha256: str, *, overwrite: bool = False,
-                      callback: ThumbCallback | None = None) -> bool:
+                      callback: ThumbCallback | None = None,
+                      priority: int = PRIORITY_BULK) -> bool:
         """按 SHA256 提交: 经 path_resolver 选取该内容的一个副本作为源。
 
         :return: True=已入队, False=重复提交被忽略 (队列中/执行中) 。
@@ -91,17 +108,35 @@ class ThumbnailGenerator:
         if sha is None:
             raise InputDataError(f"Invalid SHA256 format: {sha256!r}")
         return self._enqueue(
-            _Task(("sha", sha), self._resolve_short_side(), overwrite, callback))
+            _Task(("sha", sha), self._resolve_short_side(), overwrite, callback),
+            priority)[1]
+
+    def ensure_by_sha(self, sha256: str, *, overwrite: bool = False,
+                      priority: int = PRIORITY_INTERACTIVE
+                      ) -> Future | None:
+        """按 SHA256 确保任务已提交, 返回可等待的 Future。
+
+        与 submit_by_sha 不同, 重复提交时返回已有 Future, 供 HTTP 请求
+        异步等待生成完成; 引擎已关闭时返回 None。
+        """
+        sha = normalize_sha256(sha256)
+        if sha is None:
+            raise InputDataError(f"Invalid SHA256 format: {sha256!r}")
+        return self._enqueue(
+            _Task(("sha", sha), self._resolve_short_side(), overwrite, None),
+            priority)[0]
 
     def submit_by_file(self, logical_path: str, filename: str, *,
                        overwrite: bool = False,
-                       callback: ThumbCallback | None = None) -> bool:
+                       callback: ThumbCallback | None = None,
+                       priority: int = PRIORITY_BULK) -> bool:
         """按 逻辑路径+文件名 提交; SHA256 在执行时读取文件后计算。"""
         if not isinstance(logical_path, str) or not logical_path.startswith("/"):
             raise InputDataError(f"Invalid logical path: {logical_path!r}")
         return self._enqueue(
             _Task(("file", logical_path, filename),
-                  self._resolve_short_side(), overwrite, callback))
+                  self._resolve_short_side(), overwrite, callback),
+            priority)[1]
 
     def submit_by_folder(self, logical_path: str, *, overwrite: bool = False,
                          callback: ThumbCallback | None = None) -> int:
@@ -119,39 +154,43 @@ class ThumbnailGenerator:
             if sha is None or sha in seen:
                 continue  # 相同 SHA256 只生成一次
             seen.add(sha)
-            if self._enqueue(_Task(("sha", sha), short_side, overwrite, callback)):
+            if self._enqueue(
+                    _Task(("sha", sha), short_side, overwrite, callback),
+                    PRIORITY_BULK)[1]:
                 count += 1
         log.info(f"Thumbnail batch submitted: {logical_path} "
                  f"({count} tasks from {len(records)} files)")
         return count
 
     def shutdown(self, wait_for_pending: bool = True) -> None:
-        """停止线程池 (程序退出时调用)。
+        """停止工作线程 (程序退出时调用)。
 
         wait_for_pending=True (默认) : 不再接受新任务, 等待队列中所有任务执行完毕;
         False: 取消尚未开始的任务, 仅等待执行中任务完成。
         """
-        with self._lock:
+        with self._cond:
             if self._shutting_down:
                 return
             self._shutting_down = True
-            futures = list(self._inflight.values())
-        if wait_for_pending:
-            log.info(f"ThumbnailGenerator draining {len(futures)} tasks")
-            for future in futures:
-                try:
-                    future.result()
-                except Exception:  # noqa: BLE001 任务内部已记录日志
-                    pass
-        else:
-            for future in futures:
-                future.cancel()
-        with self._lock:
-            # 被取消(或已完成)的任务不会继续占用任务键
-            for key, future in list(self._inflight.items()):
-                if future.done():
-                    self._inflight.pop(key, None)
-        self._executor.shutdown(wait=True)
+            pending: list[_Task] = []
+            if not wait_for_pending:
+                while not self._high.empty():
+                    pending.append(self._high.get_nowait())
+                pending.extend(self._bulk.values())
+                self._bulk.clear()
+            self._cond.notify_all()
+        if not wait_for_pending:
+            for task in pending:
+                with self._cond:
+                    future = self._inflight.pop(task.key, None)
+                if future is not None:
+                    future.cancel()
+            # 不等待正在生成的图片: 工作线程为 daemon, 进程退出时一并放弃
+            log.info("ThumbnailGenerator aborted; in-flight tasks abandoned")
+            return
+        log.info(f"ThumbnailGenerator draining {len(self._inflight)} tasks")
+        for worker in self._workers:
+            worker.join()
         log.info("ThumbnailGenerator shut down")
 
     # ---------------------------------------------------------------- #
@@ -166,20 +205,57 @@ class ThumbnailGenerator:
                 f"Invalid ThumbnailShortSideSize config: {value!r}")
         return value
 
-    def _enqueue(self, task: _Task) -> bool:
-        with self._lock:
-            if self._shutting_down:
-                return False
-            if task.key in self._inflight:
-                log.debug(f"Duplicate thumbnail task ignored: {task.describe()}")
-                return False
-            future = self._executor.submit(self._worker, task)
-            self._inflight[task.key] = future
-        log.debug(f"Thumbnail task submitted: {task.describe()}")
-        return True
+    def _enqueue(self, task: _Task, priority: int
+                 ) -> tuple[Future | None, bool]:
+        """入队并返回 (Future, 是否为新任务)。
 
-    def _worker(self, task: _Task) -> None:
-        """工作线程主体: 单任务失败只回调错误, 不得让线程退出。"""
+        交互任务优先; 若同一 SHA256 的批量任务仍在等待, 将其提升到交互队列,
+        避免用户正在浏览的图片排在大量预生成任务之后。
+        """
+        with self._cond:
+            if self._shutting_down:
+                return None, False
+            existing = self._inflight.get(task.key)
+            if existing is not None:
+                if priority == PRIORITY_INTERACTIVE and task.key in self._bulk:
+                    queued = self._bulk.pop(task.key)
+                    self._high.put(queued)
+                    self._cond.notify()
+                    log.debug(f"Thumbnail task promoted: {task.describe()}")
+                else:
+                    log.debug(
+                        f"Duplicate thumbnail task ignored: {task.describe()}")
+                return existing, False
+            future = Future()
+            self._inflight[task.key] = future
+            if priority == PRIORITY_INTERACTIVE:
+                self._high.put(task)
+            else:
+                self._bulk[task.key] = task
+            self._cond.notify()
+        log.debug(f"Thumbnail task submitted: {task.describe()}")
+        return future, True
+
+    def _loop(self) -> None:
+        """工作线程: 优先取交互任务, 其次按提交顺序取批量任务。"""
+        while True:
+            with self._cond:
+                while True:
+                    if not self._high.empty():
+                        task = self._high.get_nowait()
+                        break
+                    if self._bulk:
+                        _, task = self._bulk.popitem(last=False)
+                        break
+                    if self._shutting_down:
+                        return
+                    self._cond.wait()
+            self._run_task(task)
+
+    def _run_task(self, task: _Task) -> None:
+        """执行单个任务; 失败只记录并回调错误, 不得让线程退出。"""
+        with self._cond:
+            future = self._inflight.get(task.key)
         if task.overwrite:
             log.info(f"Thumbnail overwrite requested: {task.describe()}")
         log.info(f"Thumbnail generation started: {task.describe()}")
@@ -187,13 +263,18 @@ class ThumbnailGenerator:
             logical = self._generate(task)
         except Exception as e:  # noqa: BLE001 源缺失/损坏/非图片/无权限等
             log.warning(f"Thumbnail generation failed: {task.describe()} ({e})")
+            if future is not None and not future.cancelled():
+                future.set_exception(e)
             self._notify(task.callback, None, str(e))
         else:
             log.info(f"Thumbnail generated: {logical}")
+            if future is not None and not future.cancelled():
+                future.set_result(logical)
             self._notify(task.callback, logical, None)
         finally:
-            with self._lock:
+            with self._cond:
                 self._inflight.pop(task.key, None)
+                self._cond.notify_all()
 
     @staticmethod
     def _notify(callback: ThumbCallback | None,
@@ -211,7 +292,7 @@ class ThumbnailGenerator:
     # ---------------------------------------------------------------- #
 
     def _generate(self, task: _Task) -> str:
-        """执行单个任务, 返回缩略图逻辑路径; 失败抛异常 (由 _worker 统一回调) 。"""
+        """执行单个任务, 返回缩略图逻辑路径; 失败抛异常 (由 _run_task 统一处理) 。"""
         size = task.short_side
 
         # 1) 源文件定位: sha 源经 path_resolver 选副本; 文件源直接用给定路径

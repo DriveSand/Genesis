@@ -74,15 +74,21 @@ export const store = reactive({
   editOpen: false,
   editFile: null as SearchFile | null,
   moveOpen: false,
+  moveMode: 'move' as 'move' | 'copy',
   moveTargets: [] as ContextTarget[],
   toasts: [] as ToastItem[],
   context: { open: false, x: 0, y: 0, target: null as ContextTarget | null },
   confirm: { open: false, title: '', message: '', danger: false },
   prompt: { open: false, title: '', label: '', value: '' },
+  choice: {
+    open: false, title: '', message: '',
+    options: [] as Array<{ label: string; value: string }>,
+  },
 })
 
 let pendingConfirm: ((value: boolean) => void) | null = null
 let pendingPrompt: ((value: string | null) => void) | null = null
+let pendingChoice: ((value: string | null) => void) | null = null
 let toastSeq = 0
 let scanner: EventSource | null = null
 let refreshTimer: number | undefined
@@ -292,6 +298,23 @@ export function resolvePrompt(value: string | null): void {
   store.prompt.open = false
   pendingPrompt?.(value)
   pendingPrompt = null
+}
+
+export function askChoice(
+  title: string,
+  message: string,
+  options: Array<{ label: string; value: string }>,
+): Promise<string | null> {
+  store.choice = { open: true, title, message, options }
+  return new Promise((resolve) => {
+    pendingChoice = resolve
+  })
+}
+
+export function resolveChoice(value: string | null): void {
+  store.choice.open = false
+  pendingChoice?.(value)
+  pendingChoice = null
 }
 
 // ---------------------------------------------------------------------- #
@@ -769,6 +792,47 @@ export async function reparseMetadata(file: { path: string; name: string }): Pro
   }
 }
 
+export async function reparseFolderMetadata(
+  folder: ContextTarget,
+): Promise<void> {
+  if (folder.kind !== 'folder') return
+  const folderPath = folder.path === '/'
+    ? `/${folder.name}` : `${folder.path}/${folder.name}`
+  const scope = await askChoice(
+    '重新读取元数据',
+    '请选择要更新的范围：',
+    [
+      { label: '仅当前文件夹', value: 'current' },
+      { label: '包含子目录', value: 'recursive' },
+    ],
+  )
+  if (!scope) return
+  const recursive = scope === 'recursive'
+  const ok = await askConfirm(
+    '确认操作',
+    `将重新读取“${folder.name}”${recursive ? '及其所有子目录' : ''}内的图片元数据，`
+    + '并覆盖数据库中现有的提示词、生成参数与模型信息。确定继续吗？',
+    { danger: true },
+  )
+  if (!ok) return
+  toast('正在重新读取元数据…')
+  try {
+    const result = await api.reparseFolderMetadata(folderPath, recursive)
+    if (result.failed) {
+      toast(`已重新读取 ${result.updated} 个文件，${result.failed} 个失败`,
+            'info')
+    } else {
+      toast(`已重新读取 ${result.updated} 个文件的元数据`, 'success')
+    }
+  } catch (err) {
+    toastError(err, '重新读取元数据失败')
+  } finally {
+    store.viewerBust = Date.now()
+    if (store.viewerOpen) await loadViewerDetails()
+    if (!store.inSearch) void loadContents(store.path, false)
+  }
+}
+
 // ---------------------------------------------------------------------- #
 // 独立查看页 (/view?image=...): 新标签页直接展示图片查看界面
 // ---------------------------------------------------------------------- #
@@ -888,8 +952,10 @@ export async function createFolderHere(): Promise<void> {
   }
 }
 
-export function openMoveDialog(targets: ContextTarget[]): void {
+export function openMoveDialog(targets: ContextTarget[],
+                                mode: 'move' | 'copy' = 'move'): void {
   store.moveTargets = [...targets]
+  store.moveMode = mode
   store.moveOpen = true
 }
 
@@ -923,6 +989,33 @@ export async function moveTo(targetPath: string): Promise<void> {
       source: items.map((item) => item.path),
       target: targetPath,
     })
+  }
+}
+
+export async function copyTo(targetPath: string): Promise<void> {
+  const items = store.moveTargets
+  if (!items.length) return
+  try {
+    const { results } = await api.copyEntries(
+      items.map((t) => ({
+        type: t.kind,
+        name: t.name,
+        source_path: t.path,
+        target_path: targetPath,
+      })),
+    )
+    const failed = results.filter((r) => !r.ok)
+    if (failed.length) {
+      toast(`复制失败：${localizeError(failed[0].error, '复制', {
+        target: targetPath,
+      })}`, 'error')
+    } else {
+      toast(`已复制 ${results.length} 个项目`, 'success')
+    }
+    store.moveOpen = false
+    await refresh()
+  } catch (err) {
+    toastError(err, '复制失败', { target: targetPath })
   }
 }
 

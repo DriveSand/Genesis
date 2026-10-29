@@ -13,12 +13,15 @@
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import itertools
 import os
 import queue
 import sqlite3
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
@@ -35,10 +38,32 @@ from scripts.database.upgrade import (
 )
 from scripts.logger import log
 
-# 读线程池大小
+# 读工作线程数
 _READ_WORKERS = 4
 
 _CLOSED_MSG = "Database is not initialized or already closed"
+
+# 任务优先级: Web 请求优先于后台任务 (入库/对账/缩略图解析等)
+PRIORITY_INTERACTIVE = 0
+PRIORITY_BACKGROUND = 1
+_SHUTDOWN_PRIORITY = 99
+
+_CURRENT_PRIORITY: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "genesis_db_priority", default=PRIORITY_BACKGROUND)
+
+
+@contextlib.contextmanager
+def interactive_priority():
+    """在 Web 请求作用域内把数据库任务标记为交互优先。"""
+    token = _CURRENT_PRIORITY.set(PRIORITY_INTERACTIVE)
+    try:
+        yield
+    finally:
+        _CURRENT_PRIORITY.reset(token)
+
+
+def _current_priority() -> int:
+    return _CURRENT_PRIORITY.get()
 
 # 写空闲 WAL checkpoint: 默认 10 分钟; 0 表示关闭 (由 config.json 提供)
 CHECKPOINT_IDLE_MINUTES = 10.0
@@ -109,9 +134,10 @@ def _safe_rollback(conn: sqlite3.Connection) -> None:
 class _Engine:
     """连接与线程基础设施。
 
-    写侧: 单后台线程持有唯一写连接 (线程内创建) , 任务经线程安全 FIFO
-    队列提交, 结果经 concurrent.futures.Future 返回。
-    读侧: ThreadPoolExecutor(4), 工作线程经 threading.local() 独享只读连接。
+    写侧: 单后台线程持有唯一写连接 (线程内创建) , 任务经优先级队列提交,
+    结果经 concurrent.futures.Future 返回; Web 请求优先于后台任务。
+    读侧: 固定 4 个工作线程 (各自 threading.local 只读连接) + 优先级队列,
+    同样优先处理 Web 请求的查询。
     """
 
     def __init__(self, db_path: Path,
@@ -120,11 +146,17 @@ class _Engine:
         self.path_key = ""
         self._closed = False
         self._close_lock = threading.Lock()
-        self._write_queue: queue.SimpleQueue = queue.SimpleQueue()
+        self._write_seq = itertools.count()
+        self._write_queue: queue.PriorityQueue = queue.PriorityQueue()
         self._writer = threading.Thread(
             target=self._write_loop, name="db-writer", daemon=True)
-        self._read_executor = ThreadPoolExecutor(
-            max_workers=_READ_WORKERS, thread_name_prefix="db-read")
+        self._read_seq = itertools.count()
+        self._read_queue: queue.PriorityQueue = queue.PriorityQueue()
+        self._read_workers = [
+            threading.Thread(target=self._read_loop, name=f"db-read-{index}",
+                             daemon=True)
+            for index in range(_READ_WORKERS)
+        ]
         self._local = threading.local()
         self._read_conns: list[sqlite3.Connection] = []
         self._read_conns_lock = threading.Lock()
@@ -135,6 +167,8 @@ class _Engine:
         self._checkpoint_stop = threading.Event()
         self._checkpoint_thread: threading.Thread | None = None
         self._writer.start()
+        for worker in self._read_workers:
+            worker.start()
         if self._idle_checkpoint_seconds > 0:
             self._checkpoint_thread = threading.Thread(
                 target=self._checkpoint_loop, name="db-checkpoint", daemon=True)
@@ -151,7 +185,8 @@ class _Engine:
             if self._closed:
                 raise DatabaseClosedError(_CLOSED_MSG)
             future = Future()
-            self._write_queue.put((fn, args, future))
+            self._write_queue.put(
+                (_current_priority(), next(self._write_seq), (fn, args, future)))
             self._last_write_at = time.monotonic()
             return future
 
@@ -166,7 +201,9 @@ class _Engine:
             if self._closed:
                 return None
             future = Future()
-            self._write_queue.put((_CHECKPOINT_TASK, (), future))
+            self._write_queue.put(
+                (PRIORITY_BACKGROUND, next(self._write_seq),
+                 (_CHECKPOINT_TASK, (), future)))
             self._last_write_at = time.monotonic()
             return future
 
@@ -207,7 +244,7 @@ class _Engine:
             return
         try:
             while True:
-                task = self._write_queue.get()
+                _priority, _seq, task = self._write_queue.get()
                 if task is None:  # 关闭哨兵: 先于哨兵入队的任务均已处理完毕
                     break
                 fn, args, future = task
@@ -241,7 +278,7 @@ class _Engine:
     def _drain_with_error_on_startup(self) -> None:
         """写连接建立失败: 持续排空队列, 等待者全部以该异常收尾, 避免永久阻塞。"""
         while True:
-            task = self._write_queue.get()
+            _priority, _seq, task = self._write_queue.get()
             if task is None:
                 return
             _, _, future = task
@@ -251,11 +288,27 @@ class _Engine:
 
     # ---- 读侧 ----
     def submit_read(self, fn, *args) -> Future:
-        """提交读任务到线程池 (并发执行, 不排队等待前序任务) 。"""
+        """提交读任务到优先级队列 (4 个工作线程并发执行)。"""
         with self._close_lock:
             if self._closed:
                 raise DatabaseClosedError(_CLOSED_MSG)
-            return self._read_executor.submit(self._read_job, fn, args)
+            future = Future()
+            self._read_queue.put(
+                (_current_priority(), next(self._read_seq), fn, args, future))
+            return future
+
+    def _read_loop(self) -> None:
+        while True:
+            item = self._read_queue.get()
+            _priority, _seq, fn, args, future = item
+            if fn is None:  # 关闭哨兵
+                return
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(self._read_job(fn, args))
+            except BaseException as e:  # noqa: BLE001 异常交给等待方
+                future.set_exception(e)
 
     def _read_job(self, fn, args) -> Any:
         try:
@@ -293,9 +346,23 @@ class _Engine:
         self._checkpoint_stop.set()
         if self._checkpoint_thread is not None:
             self._checkpoint_thread.join(timeout=5)
-        self._write_queue.put(None)  # FIFO 保证排在所有已提交任务之后
+        # 写任务全部处理完毕后再退出 (优先级 99 保证排在所有写任务之后)
+        self._write_queue.put(
+            (_SHUTDOWN_PRIORITY, next(self._write_seq), None))
         self._writer.join()
-        self._read_executor.shutdown(wait=True)
+        # 读任务无副作用: 丢弃排队中的读请求, 仅等待执行中的读完成
+        while True:
+            try:
+                _p, _s, fn, args, future = self._read_queue.get_nowait()
+            except queue.Empty:
+                break
+            if fn is not None and future is not None:
+                future.cancel()
+        for _worker in self._read_workers:
+            self._read_queue.put(
+                (_SHUTDOWN_PRIORITY, next(self._read_seq), None, (), None))
+        for worker in self._read_workers:
+            worker.join()
         # 读线程此时均已退出, 集中兜底关闭其连接 (无线程仍在使用,
         # 不构成运行期跨线程共享; 线程本地对象本身亦随线程退出释放)
         with self._read_conns_lock:

@@ -159,6 +159,12 @@ class FileManager:
         return self.operations.move_entry(source_parent, name, target_parent,
                                           is_dir, destination)
 
+    def copy_entry(self, source_parent: str, name: str, target_parent: str,
+                   is_dir: bool = False,
+                   destination: Literal["mount", "local"] | None = None) -> str:
+        return self.operations.copy_entry(source_parent, name, target_parent,
+                                          is_dir, destination)
+
     def entry_stat(self, parent_path: str,
                    name: str) -> dict[str, Any] | None:
         return self.operations.entry_stat(parent_path, name)
@@ -186,6 +192,10 @@ class FileManager:
     def reparse_metadata(self, parent_path: str,
                          filename: str) -> dict[str, Any]:
         return self.operations.reparse_metadata(parent_path, filename)
+
+    def reparse_folder_metadata(self, folder_path: str,
+                                recursive: bool = False) -> dict[str, int]:
+        return self.operations.reparse_folder_metadata(folder_path, recursive)
 
     # ------------------------------------------------------------------ #
     # 上传流程

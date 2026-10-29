@@ -2,7 +2,7 @@
 import Icon from './Icon.vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../api'
-import { moveTo, store, toastError } from '../store'
+import { copyTo, moveTo, store, toastError } from '../store'
 import type { FolderEntry } from '../types'
 
 const currentPath = ref('/')
@@ -28,6 +28,9 @@ const targetLabel = computed(() =>
     ? store.moveTargets[0].name
     : `${store.moveTargets.length} 个项目`,
 )
+
+const isCopy = computed(() => store.moveMode === 'copy')
+const actionText = computed(() => isCopy.value ? '复制' : '移动')
 
 async function load(path: string): Promise<void> {
   loading.value = true
@@ -62,7 +65,8 @@ function close(): void {
 async function confirm(target: string): Promise<void> {
   busy.value = true
   try {
-    await moveTo(target)
+    if (isCopy.value) await copyTo(target)
+    else await moveTo(target)
   } finally {
     busy.value = false
   }
@@ -84,7 +88,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   <div class="overlay" @mousedown.self="close">
     <div class="modal panel">
       <div class="panel-title">
-        <span>移动 {{ targetLabel }}</span>
+        <span>{{ actionText }} {{ targetLabel }}</span>
         <button class="icon-btn" :disabled="busy" @click="close">
           <Icon name="close" label="close" />
         </button>
@@ -122,11 +126,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         <div class="spacer"></div>
         <button class="btn" :disabled="busy" @click="close">取消</button>
         <button class="btn" :disabled="busy" @click="confirm(currentPath)">
-          移动到此处
+          {{ actionText }}到此处
         </button>
         <button class="btn accent" :disabled="busy || !selected"
                 @click="confirm(currentPath === '/' ? `/${selected}` : `${currentPath}/${selected}`)">
-          移动到「{{ selected || '未选择' }}」
+          {{ actionText }}到「{{ selected || '未选择' }}」
         </button>
       </div>
     </div>

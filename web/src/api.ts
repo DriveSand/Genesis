@@ -110,6 +110,13 @@ export const api = {
       { method: 'POST' },
     ),
 
+  reparseFolderMetadata: (folderPath: string, recursive: boolean) =>
+    request<{ ok: boolean; files: number; updated: number; failed: number }>(
+      `/api/v1/images/metadata/refresh-folder?folder_path=${encodeURIComponent(folderPath)}`
+      + `&recursive=${recursive ? 'true' : 'false'}`,
+      { method: 'POST' },
+    ),
+
   modelNames: (kind: string) =>
     request<{ kind: string; names: string[] }>(`/api/v1/images/model-names?kind=${kind}`),
 
@@ -126,6 +133,10 @@ export const api = {
   moveEntries: (content: Array<{ type: string; name: string; source_path: string; target_path: string }>) =>
     request<{ results: Array<{ name: string; path: string; ok: boolean; new_path?: string; error?: string }> }>(
       '/api/v1/files/move', jsonInit({ content })),
+
+  copyEntries: (content: Array<{ type: string; name: string; source_path: string; target_path: string }>) =>
+    request<{ results: Array<{ name: string; path: string; ok: boolean; new_path?: string; error?: string }> }>(
+      '/api/v1/files/copy', jsonInit({ content })),
 
   rename: (type: string, name: string, path: string, newName: string) =>
     request<{ ok: boolean }>('/api/v1/files/rename', jsonInit({ type, name, path, new_name: newName })),

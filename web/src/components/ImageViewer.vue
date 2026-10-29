@@ -191,10 +191,22 @@ function onWheel(event: WheelEvent): void {
     && now - wheelRapidSince >= WHEEL_ULTRA_AFTER
   const step = ultra ? WHEEL_ULTRA_STEP
     : rapid ? WHEEL_FAST_STEP : WHEEL_STEP
-  zoom.value = clampZoom(zoom.value + direction * step)
+  const oldZoom = zoom.value
+  const nextZoom = clampZoom(oldZoom + direction * step)
+  // 以鼠标指针为缩放中心: 保持指针下方的图片位置不变
+  const canvas = canvasEl.value
+  if (canvas && oldZoom > 0 && nextZoom !== oldZoom) {
+    const rect = canvas.getBoundingClientRect()
+    const px = event.clientX - rect.left - rect.width / 2
+    const py = event.clientY - rect.top - rect.height / 2
+    const ratio = nextZoom / oldZoom
+    panX.value += (px - panX.value) * (1 - ratio)
+    panY.value += (py - panY.value) * (1 - ratio)
+  }
+  zoom.value = nextZoom
 }
 
-// ---------------- 放大后拖动 ----------------
+// ---------------- 拖动 ----------------
 
 const panX = ref(0)
 const panY = ref(0)
@@ -220,14 +232,15 @@ function clampPan(): void {
   // 旋转后的轴对齐包围盒
   const boundsW = width * cos + height * sin
   const boundsH = width * sin + height * cos
-  const maxX = Math.max(0, (boundsW - canvas.clientWidth) / 2)
-  const maxY = Math.max(0, (boundsH - canvas.clientHeight) / 2)
+  // 图片大于查看区时限制边缘不越过视口; 小于查看区时允许拖动但保持完整可见
+  const maxX = Math.abs(canvas.clientWidth - boundsW) / 2
+  const maxY = Math.abs(canvas.clientHeight - boundsH) / 2
   panX.value = Math.max(-maxX, Math.min(maxX, panX.value))
   panY.value = Math.max(-maxY, Math.min(maxY, panY.value))
 }
 
 function onImageMouseDown(event: MouseEvent): void {
-  if (locked.value || zoom.value <= 1) return
+  if (locked.value) return
   dragging.value = true
   dragState = {
     x: event.clientX, y: event.clientY,
@@ -286,13 +299,9 @@ watch(locked, (value) => {
   panY.value = 0
 })
 
-watch(zoom, (value) => {
-  if (value <= 1) {
-    panX.value = 0
-    panY.value = 0
-  } else {
-    clampPan()
-  }
+watch(zoom, () => {
+  // 任何倍率下都允许平移, 只夹取到仍可见的范围
+  clampPan()
 })
 
 watch(rotation, () => {
@@ -368,8 +377,7 @@ onBeforeUnmount(() => {
         <button class="btn small" @click="reparse">
           <Icon name="refresh" class="icon" />重新读取元数据
         </button>
-        <div class="spacer"></div>
-        <button class="btn ghost small" @click="download">
+        <button class="btn small" @click="download">
           <Icon name="download" class="icon" />下载图像
         </button>
       </div>
@@ -579,6 +587,7 @@ onBeforeUnmount(() => {
 
 .nav-arrow {
   position: absolute;
+  z-index: 2;  /* 高于 transform 后的图片, 避免左箭头被遮挡 */
   top: 50%;
   transform: translateY(-50%);
   width: 42px;

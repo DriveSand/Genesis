@@ -14,6 +14,7 @@ import {
   openMoveDialog,
   regenerateThumbnail,
   renameTarget,
+  reparseFolderMetadata,
   reparseMetadata,
   store,
   toastError,
@@ -46,6 +47,12 @@ function reparse(): void {
   const t = target()
   closeContext()
   if (t) void reparseMetadata(t)
+}
+
+function reparseFolder(): void {
+  const t = target()
+  closeContext()
+  if (t) void reparseFolderMetadata(t)
 }
 
 async function copyPrompt(): Promise<void> {
@@ -92,6 +99,12 @@ function move(): void {
   if (t) openMoveDialog([t])
 }
 
+function copy(): void {
+  const t = target()
+  closeContext()
+  if (t) openMoveDialog([t], 'copy')
+}
+
 function openFolder(): void {
   const t = target()
   closeContext()
@@ -128,13 +141,16 @@ function uploadHere(): void {
       <button class="item" @click="download">下载此图像</button>
       <button class="item" @click="regenerate">重新生成此图像缩略图</button>
       <button class="item" @click="move">移动到…</button>
+      <button class="item" @click="copy">复制到…</button>
       <div class="sep"></div>
       <button class="item danger" @click="remove">删除此图像</button>
     </template>
     <template v-else>
       <button class="item" @click="openFolder">打开</button>
+      <button class="item" @click="reparseFolder">重新读取此文件夹内的图片元数据</button>
       <button class="item" @click="rename">重命名</button>
       <button class="item" @click="move">移动到…</button>
+      <button class="item" @click="copy">复制到…</button>
       <button class="item" @click="download">下载此文件夹</button>
       <div class="sep"></div>
       <button class="item danger" @click="remove">删除此文件夹</button>
