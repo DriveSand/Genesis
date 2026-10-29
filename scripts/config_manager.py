@@ -39,7 +39,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "AutoRefresh": True,  # 前端自动刷新
     "ShowLevel": [0,1,2,3,4], # 想要看见的图片等级
     "SafeBrowsingMode": False,  # 安全浏览模式（只显示G级别的图像）
-    "BlurLevel": 2,  # 开始模糊的等级。 0级为G；1级为PG-13；2级为R；3级为X；4级为XXX
+    # 开始模糊的等级。-1=None（不模糊）；0=G；1=PG-13；2=R；3=X；4=XXX
+    "BlurLevel": 2,
     # 数据库写空闲多少分钟后自动执行 WAL checkpoint（0 = 关闭）。重启程序生效
     "DatabaseIdleCheckpointMinutes": 10,
 }

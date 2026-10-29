@@ -31,6 +31,72 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     ).fetchone() is not None
 
 
+# v2 时代的模型表结构 (v3 会将其重命名为 checkpoint/lora/embedding/vae)。
+# 迁移 v1 -> v2 时必须按当时的表名建表, 不能直接使用当前版本的建表脚本。
+_V2_MODEL_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS model_checkpoint (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    name    TEXT NOT NULL,
+    version TEXT NOT NULL DEFAULT '',
+    url     TEXT NOT NULL DEFAULT '',
+    UNIQUE(name, version, url)
+);
+CREATE TABLE IF NOT EXISTS model_lora (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_type INTEGER NOT NULL CHECK(model_type IN (0,1)),
+    name       TEXT NOT NULL,
+    version    TEXT NOT NULL DEFAULT '',
+    url        TEXT NOT NULL DEFAULT '',
+    UNIQUE(model_type, name, version, url)
+);
+CREATE TABLE IF NOT EXISTS model_embedding (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    name    TEXT NOT NULL,
+    version TEXT NOT NULL DEFAULT '',
+    url     TEXT NOT NULL DEFAULT '',
+    UNIQUE(name, version, url)
+);
+CREATE TABLE IF NOT EXISTS model_vae (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    name    TEXT NOT NULL,
+    version TEXT NOT NULL DEFAULT '',
+    url     TEXT NOT NULL DEFAULT '',
+    UNIQUE(name, version, url)
+);
+CREATE TABLE IF NOT EXISTS file_checkpoint (
+    file_id       INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    checkpoint_id INTEGER NOT NULL REFERENCES model_checkpoint(id) ON DELETE CASCADE,
+    PRIMARY KEY(file_id, checkpoint_id)
+);
+CREATE TABLE IF NOT EXISTS file_lora (
+    file_id INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    lora_id INTEGER NOT NULL REFERENCES model_lora(id) ON DELETE CASCADE,
+    weight  REAL NOT NULL,
+    PRIMARY KEY(file_id, lora_id)
+);
+CREATE TABLE IF NOT EXISTS file_embedding (
+    file_id      INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    embedding_id INTEGER NOT NULL REFERENCES model_embedding(id) ON DELETE CASCADE,
+    PRIMARY KEY(file_id, embedding_id)
+);
+CREATE TABLE IF NOT EXISTS file_vae (
+    file_id INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    vae_id  INTEGER NOT NULL REFERENCES model_vae(id) ON DELETE CASCADE,
+    PRIMARY KEY(file_id, vae_id)
+);
+"""
+
+_V2_MODEL_SCHEMA_STATEMENTS = [
+    s.strip() for s in _V2_MODEL_SCHEMA_SQL.split(";") if s.strip()
+]
+
+
+def _ensure_v2_model_schema(conn: sqlite3.Connection) -> None:
+    """创建 v2 版本的模型注册表与中间表 (旧表名)。"""
+    for statement in _V2_MODEL_SCHEMA_STATEMENTS:
+        conn.execute(statement)
+
+
 def _migrate_v1(conn: sqlite3.Connection) -> None:
     """v0 -> v1: 把 info 表的 width/height/file_size 迁移到 file 表。
 
@@ -137,8 +203,8 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
         elif columns:
             conn.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
 
-    # 新表与索引 (与 _SCHEMA_SQL 共用同一份定义)
-    creation.ensure_schema(conn)
+    # v2 版本的模型注册表与中间表 (v3 迁移会将其重命名)
+    _ensure_v2_model_schema(conn)
 
     # 模型注册表: 仅保留仍被至少一个文件引用的旧模型
     if _table_exists(conn, "old_model_checkpoint"):
@@ -203,11 +269,34 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
     log.info("Database schema migrated: models are now bound to files")
 
 
+def _migrate_v3(conn: sqlite3.Connection) -> None:
+    """v2 -> v3: 模型注册表去掉 model_ 前缀, 并新增 upscale 模型。
+
+    SQLite 的 ALTER TABLE RENAME 会同步更新 file_* 中间表中的外键引用,
+    因此已有文件-模型关联保持不变。新表/索引由 bootstrap 末尾的
+    creation.ensure_schema 统一补齐。
+    """
+    for old, new in (("model_checkpoint", "checkpoint"),
+                     ("model_lora", "lora"),
+                     ("model_embedding", "embedding"),
+                     ("model_vae", "vae")):
+        if not _table_exists(conn, old):
+            continue
+        if _table_exists(conn, new):
+            log.warning("Both legacy and new model tables exist, keeping new: "
+                        f"{old} / {new}")
+            continue
+        conn.execute(f"ALTER TABLE {old} RENAME TO {new}")
+        log.info(f"Model table renamed: {old} -> {new}")
+    log.info("Database schema migrated: model tables renamed; upscale added")
+
+
 # 结构迁移表: 目标版本 -> 迁移函数 (在写事务内执行)。
-# 版本 0 为未记录版本号的历史库; 版本 2 为当前基线。
+# 版本 0 为未记录版本号的历史库; 版本 3 为当前基线。
 _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_v1,
     2: _migrate_v2,
+    3: _migrate_v3,
 }
 
 

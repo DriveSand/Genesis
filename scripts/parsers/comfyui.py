@@ -28,6 +28,11 @@ from collections import deque
 from typing import TYPE_CHECKING, Any
 
 from scripts.logger import log
+from scripts.parsers.comfy_nodes_parsers import (
+    model_parser,
+    prompt_parser,
+    upscale_parser,
+)
 
 if TYPE_CHECKING:
     from scripts.parsers import RawMetadata
@@ -86,6 +91,7 @@ def parse(raw: "RawMetadata") -> dict[str, Any]:
     sampler_from_infotext = False
     checkpoint: tuple[str, str] | None = None
     loras: list[dict[str, Any]] = []
+    upscales = _collect_upscales(nodes)
     extras: dict[str, Any] = {}
 
     # 1) 工作流 KSampler: 提示词与采样参数的首要来源
@@ -178,7 +184,7 @@ def parse(raw: "RawMetadata") -> dict[str, Any]:
                          _inline_loras(positive + "\n" + negative))
 
     if not (positive or negative or seed is not None or steps or cfg
-            or checkpoint or vae or loras):
+            or checkpoint or vae or loras or upscales):
         log.debug(f"ComfyUI workflow yielded no usable metadata: {raw.file_path}")
         return {}
 
@@ -198,6 +204,7 @@ def parse(raw: "RawMetadata") -> dict[str, Any]:
             "embeddings": [],
             "vaes": ([_model(vae[0], vae[1])]
                      if vae and vae[0] else []),
+            "upscales": upscales,
         },
     }
 
@@ -346,19 +353,13 @@ def _prompt_from(nodes: dict[str, Any], value: Any, side: str,
         return _merge_clip(text_g, text_l)
     if node_type == "CLIPTextEncodeSDXLRefiner":
         return _prompt_from(nodes, inputs.get("text"), side, seen)
-    if node_type == "easy positive":
-        return _prompt_from(nodes, inputs.get("positive"), "positive", seen)
-    if node_type == "easy negative":
-        return _prompt_from(nodes, inputs.get("negative"), "negative", seen)
-    if node_type == "easy promptConcat":
-        first = _prompt_from(nodes, inputs.get("prompt1"), side, seen)
-        second = _prompt_from(nodes, inputs.get("prompt2"), side, seen)
-        separator = inputs.get("separator")
-        separator = separator if isinstance(separator, str) else ","
-        return _join_prompts([first, second], separator)
-    if node_type == "SDXLPromptStyler":
-        key = "text_positive" if side == "positive" else "text_negative"
-        return _prompt_from(nodes, inputs.get(key), side, seen)
+
+    # 自定义节点: 交给 comfy_nodes_parsers 中对应模块
+    parser = prompt_parser(node_type)
+    if parser is not None:
+        return parser.extract_prompt(
+            inputs, side, _NodeContext(nodes, seen, side))
+
     if node_type == "ConditioningCombine":
         first = _prompt_from(nodes, inputs.get("conditioning_1"), side, seen)
         second = _prompt_from(nodes, inputs.get("conditioning_2"), side, seen)
@@ -435,100 +436,128 @@ def _collect_model_chain(nodes: dict[str, Any], value: Any,
         return (_split_model_name(name, last_underscore=False)
                 if name else None), []
 
-    loras: list[dict[str, Any]] = []
     if node_type in _LORA_TYPES:
-        loras.append(_lora(inputs.get("lora_name"),
-                           inputs.get("strength_model",
-                                      inputs.get("strength", 1.0))))
-    elif node_type == "easy loraStackApply":
-        loras.extend(_easy_lora_stack(nodes, inputs.get("lora_stack")))
-    elif node_type == "easy loraStack":
-        loras.extend(_easy_stack_inputs(inputs))
-    elif node_type == "Lora Loader (LoraManager)":
-        manager_loras = _lora_manager_loras(inputs.get("loras"))
-        if not manager_loras:
-            # loras 列表缺失时退回解析节点文本中的 <lora:...> 标签
-            manager_loras = _inline_loras(_as_str(inputs.get("text")))
-        loras.extend(manager_loras)
+        loras = [_lora(inputs.get("lora_name"),
+                       inputs.get("strength_model",
+                                  inputs.get("strength", 1.0)))]
+        parent, parents = _collect_model_chain(
+            nodes, inputs.get("model"), seen)
+        return parent, loras + parents
 
-    parent, parents = _collect_model_chain(nodes, inputs.get("model"), seen)
-    if parent is None and node_type not in _LORA_TYPES | {
-            "easy loraStackApply", "Lora Loader (LoraManager)"}:
-        # 未知桥接节点: 继续沿常见模型输入回溯
-        for key in ("base_model", "optional_model", "MODEL"):
-            if key in inputs:
-                parent, parents = _collect_model_chain(nodes, inputs[key], seen)
-                if parent is not None:
-                    break
-    return parent, loras + parents
-
-
-def _easy_lora_stack(nodes: dict[str, Any],
-                     value: Any) -> list[dict[str, Any]]:
-    linked = _link(value)
-    target = nodes.get(linked) if linked else None
-    if not isinstance(target, dict):
-        return []
-    if target.get("class_type") == "easy loraStack":
-        return _easy_stack_inputs(target.get("inputs") or {})
-    return []
-
-
-def _easy_stack_inputs(inputs: dict[str, Any]) -> list[dict[str, Any]]:
-    """easy loraStack: lora_N_name / strength / model_strength 系列字段。
-
-    权重取决于 mode: "simple" 用 lora_N_strength (UNet/CLIP 相同),
-    "advanced" 用 lora_N_model_strength (单权重字段记录 UNet 权重)。
-    """
-    if inputs.get("toggle") is False:
-        return []
-    mode = _as_str(inputs.get("mode")).lower()
-    advanced = mode == "advanced"
-    try:
-        count = int(inputs.get("num_loras") or 0)
-    except (TypeError, ValueError):
-        count = 0
-    result: list[dict[str, Any]] = []
-    # num_loras 缺失时按实际存在的 lora_N_name 顺序扫描
-    limit = count if count > 0 else 64
-    for index in range(1, limit + 1):
-        key = f"lora_{index}_name"
-        if key not in inputs and count <= 0:
-            break
-        name = _as_str(inputs.get(key))
-        if not name or name.lower() == "none":
-            continue
-        if advanced:
-            weight = inputs.get(f"lora_{index}_model_strength",
-                                inputs.get(f"lora_{index}_strength", 1.0))
+    parser = model_parser(node_type)
+    if parser is not None:
+        ckpt_name, loras, follow = parser.extract_model(
+            inputs, _NodeContext(nodes, seen), node_type)
+        if isinstance(ckpt_name, tuple):
+            # 模块直接透传 ctx.model() 的结果 (name, version)
+            checkpoint = ckpt_name if ckpt_name and ckpt_name[0] else None
+        elif isinstance(ckpt_name, str) and ckpt_name.strip():
+            checkpoint = _split_model_name(ckpt_name, last_underscore=False)
         else:
-            weight = inputs.get(f"lora_{index}_strength", 1.0)
-        result.append(_lora(name, weight))
-    return result
+            checkpoint = None
+        if follow is not None:
+            parent, parents = _collect_model_chain(nodes, follow, seen)
+            checkpoint = checkpoint or parent
+            loras += parents
+        return checkpoint, loras
+
+    # 未知桥接节点: 继续沿常见模型输入回溯
+    for key in ("model", "base_model", "optional_model", "MODEL"):
+        if key in inputs:
+            parent, parents = _collect_model_chain(nodes, inputs[key], seen)
+            if parent is not None:
+                return parent, parents
+    return None, []
 
 
-def _lora_manager_loras(entries: Any) -> list[dict[str, Any]]:
-    """ComfyUI-Lora-Manager 的 loras 列表 (结构随版本变化, 宽松解析)。
+class _NodeContext:
+    """提供给自定义节点模块的递归接口 (不暴露内部数据结构)。"""
 
-    实际结构为 ``{"__value__": [{"name", "strength", "active", ...}]}``;
-    仅收录 active != False 的条目, 权重取 strength (UNet 权重)。
-    """
-    # 新版节点把列表包在 __value__ / value 中
-    if isinstance(entries, dict):
-        entries = entries.get("__value__", entries.get("value"))
-    if not isinstance(entries, list):
-        return []
+    def __init__(self, nodes: dict[str, Any], seen: set[str],
+                 side: str = "positive") -> None:
+        self._nodes = nodes
+        self._seen = seen
+        self._side = side
+
+    def prompt(self, value: Any, side: str | None = None) -> str | None:
+        return _prompt_from(self._nodes, value, side or self._side, self._seen)
+
+    def scalar(self, value: Any) -> Any:
+        return _resolve_scalar(self._nodes, value)
+
+    @staticmethod
+    def join(parts: list[str | None], separator: str) -> str:
+        return _join_prompts(parts, separator)
+
+    @staticmethod
+    def stem(name: Any) -> str:
+        return _model_stem(_as_str(name))
+
+    def lora(self, name: Any, weight: Any) -> dict[str, Any]:
+        return _lora(name, weight)
+
+    def lora_entry(self, name: Any, weight: Any,
+                   version: str) -> dict[str, Any]:
+        return {
+            "name": _model_stem(_as_str(name)),
+            "version": str(version or ""),
+            "url": None,
+            "weight": _as_float(weight, default=1.0),
+            "model_type": 0,
+        }
+
+    @staticmethod
+    def inline_loras(text: Any) -> list[dict[str, Any]]:
+        return _inline_loras(_as_str(text))
+
+    def model(self, value: Any
+              ) -> tuple[tuple[str, str] | None, list[dict[str, Any]]]:
+        return _collect_model_chain(self._nodes, value, self._seen)
+
+    def loras(self, value: Any) -> list[dict[str, Any]]:
+        return _collect_model_chain(self._nodes, value, self._seen)[1]
+
+    def upscale(self, value: Any) -> str | None:
+        return _upscale_from(self._nodes, value, self._seen)
+
+
+def _upscale_from(nodes: dict[str, Any], value: Any,
+                  seen: set[str] | None = None) -> str | None:
+    """沿 upscale_model 链接解析放大模型文件名。"""
+    linked = _link(value)
+    node = nodes.get(linked) if linked else None
+    if not isinstance(node, dict):
+        return None
+    if seen is None:
+        seen = set()
+    if linked in seen:
+        return None
+    seen.add(linked)
+    parser = upscale_parser(node.get("class_type"))
+    if parser is None:
+        return None
+    return parser.extract_upscale(node.get("inputs") or {},
+                                  _NodeContext(nodes, seen))
+
+
+def _collect_upscales(nodes: dict[str, Any]) -> list[dict[str, Any]]:
+    """扫描全部节点, 收集放大模型 (CR Upscale Image / UpscaleModelLoader 等)。"""
     result: list[dict[str, Any]] = []
-    for entry in entries:
-        if isinstance(entry, str):
-            result.append(_lora(entry, 1.0))
-        elif isinstance(entry, dict):
-            if entry.get("active") is False:
-                continue
-            name = entry.get("name") or entry.get("lora_name") or entry.get("file")
-            weight = entry.get("strength", entry.get("weight", 1.0))
-            if isinstance(name, str) and name.strip():
-                result.append(_lora(name, weight))
+    seen: set[tuple[str, str]] = set()
+    for node in nodes.values():
+        if not isinstance(node, dict):
+            continue
+        parser = upscale_parser(node.get("class_type"))
+        if parser is None:
+            continue
+        name = parser.extract_upscale(
+            node.get("inputs") or {}, _NodeContext(nodes, set()))
+        if not isinstance(name, str) or not name.strip():
+            continue
+        pair = _split_model_name(name, last_underscore=True)
+        if pair[0] and pair not in seen:
+            seen.add(pair)
+            result.append(_model(*pair))
     return result
 
 

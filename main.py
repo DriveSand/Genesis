@@ -241,22 +241,22 @@ def main():
         except KeyboardInterrupt:
             log.info("Keyboard interrupt received")
     finally:
-        # 1) server.run() 返回时 FastAPI 已停止监听并结束在途请求
+        # 1) server.run() 返回时 FastAPI 已停止监听并结束在途请求 (含 SSE)
         if server is not None:
             log.info("FastAPI stopped")
-        # 2) 等待缩略图队列全部处理完毕 (不再接受新任务)
+        # 2) 放弃缩略图队列: 清空排队任务, 正在生成的任务不再等待
         if thumb is not None:
             try:
-                thumb.shutdown(wait_for_pending=True)
+                thumb.shutdown(wait_for_pending=False)
             except Exception as exc:  # noqa: BLE001 单步失败不阻断后续清理
                 log.error(f"Thumbnail shutdown failed: {exc}", exc_info=True)
-        # 3) 停止目录监控
+        # 3) 停止目录监控与文件管理后台线程
         if fm is not None:
             try:
                 fm.shutdown()
             except Exception as exc:  # noqa: BLE001
                 log.error(f"FileManager shutdown failed: {exc}", exc_info=True)
-        # 4) 数据库退出
+        # 4) 数据库退出 (优先保证写事务完成与连接正常关闭)
         try:
             db.close()
         except Exception as exc:  # noqa: BLE001

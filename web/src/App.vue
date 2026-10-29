@@ -11,6 +11,7 @@ import SettingsModal from './components/SettingsModal.vue'
 import UploadPanel from './components/UploadPanel.vue'
 import MoveDialog from './components/MoveDialog.vue'
 import ContextMenu from './components/ContextMenu.vue'
+import ChoiceDialog from './components/ChoiceDialog.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import PromptDialog from './components/PromptDialog.vue'
 import ToastHost from './components/ToastHost.vue'
@@ -50,6 +51,7 @@ onBeforeUnmount(() => {
     <MoveDialog v-if="store.moveOpen" />
     <ContextMenu v-if="store.context.open" />
     <ConfirmDialog v-if="store.confirm.open" />
+    <ChoiceDialog v-if="store.choice.open" />
     <PromptDialog v-if="store.prompt.open" />
     <ToastHost />
   </div>

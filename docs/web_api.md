@@ -1,6 +1,6 @@
 # Web 后端接口说明
 
-FastAPI 实现，启动入口 `main.py`。接口契约以 `construction/前端API.md` 为准，本文补充实现约定与补充端点。前端构建产物位于 `web/dist`，由后端直接托管（访问 `/`）。
+FastAPI 实现，启动入口 `main.py`。接口契约以 `construction/前端API.md` 为准，本文补充实现约定与补充端点。前端构建产物位于 `web/dist`，由后端直接托管（访问 `/`）。入口 `index.html` 以 `no-store` 返回，重新构建并重启后浏览器会自动加载新的带哈希资源，无需手动强制刷新。
 
 ## 通用约定
 
@@ -16,10 +16,11 @@ FastAPI 实现，启动入口 `main.py`。接口契约以 `construction/前端AP
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/v1/status` | 服务状态（`read_only`、`enable_thumbnail`） |
-| GET | `/api/v1/images/models` | 图片使用的模型（checkpoint/lora/embedding/vae） |
+| GET | `/api/v1/images/models` | 图片使用的模型（checkpoint/lora/embedding/vae/upscale） |
 | GET | `/api/v1/images/metadata` | 图片生成信息 |
 | POST | `/api/v1/images/metadata/update` | 修改元数据（仅改数据库） |
 | POST | `/api/v1/images/metadata/refresh?image_path=` | 重新解析图片元数据并写回数据库；分辨率/文件大小总刷新，响应含 `has_metadata`（补充端点） |
+| POST | `/api/v1/images/metadata/refresh-folder?folder_path=&recursive=` | 重新读取文件夹内全部图片的元数据（`recursive=true` 时含子目录），返回 `files/updated/failed`（补充端点） |
 | GET | `/api/v1/images/model-names?kind=` | 某种模型的去重名称（编辑联想，补充端点） |
 | GET | `/api/v1/images/thumbnail?image_sha256=` | 缩略图（缺失时按需生成并等待） |
 | POST | `/api/v1/images/thumbnail/regenerate?image_sha256=` | 重新生成单张缩略图（补充端点） |
@@ -32,6 +33,7 @@ FastAPI 实现，启动入口 `main.py`。接口契约以 `construction/前端AP
 | POST | `/api/v1/downloads/batch` | 多文件/目录流式 ZIP（仅存储，重名追加 `(N)`） |
 | POST | `/api/v1/files/delete` | 批量删除（文件夹递归删除） |
 | POST | `/api/v1/files/move` | 批量跨目录移动 |
+| POST | `/api/v1/files/copy` | 批量跨目录复制（文件保留元数据与模型关联） |
 | POST | `/api/v1/files/rename` | 重命名 |
 | POST | `/api/v1/files/folder` | 新建文件夹（`auto_rename: true` 时同名自动追加 `(N)`，补充端点） |
 | GET | `/api/v1/settings` | 获取配置 |
@@ -46,6 +48,7 @@ FastAPI 实现，启动入口 `main.py`。接口契约以 `construction/前端AP
 ## 行为说明
 
 - **目录内容**：响应额外携带当前目录 `uuid`（供 SSE 使用）；`scanned_path` 表示目录物理位置可访问。
+- **缩略图生成**：前端按需请求的缩略图任务优先于批量预生成（`--generate_image_cache`）任务；请求通过异步 Future 等待结果，不占用工作线程，因此大量缩略图积压时目录浏览仍可正常响应。
 - **目录扫描 (SSE)**：服务端每 2 秒比对子目录数/文件数/时间戳，变化时推送 `change`；前端在 `AutoRefresh` 开启时自动订阅。程序退出时无需客户端断开：收到停止信号后事件流会主动结束（0.2 秒内响应）；若仍有长连接未结束，FastAPI 的优雅关闭最多等待 3 秒，随后强制关闭。
 - **搜索**：同一条件数组内多元素取 OR，条件之间取 AND；include 为"包含"、exclusion 为"不得包含"；模型名称大小写不敏感，版本留空匹配全部版本；文件大小按字节、区间为开区间，`0` 表示该侧不设限。
 - **基本搜索目录模式**：前端把 `$p:` 后连续的引号字符串解析为 `path` 数组（`$p:"/123" "*/test"` 表示组内 OR）；目录名含空格时必须写在引号内。各模式语义：
@@ -58,9 +61,10 @@ FastAPI 实现，启动入口 `main.py`。接口契约以 `construction/前端AP
 - **入库竞态**：新文件在写入完成后才计算 SHA256、探测分辨率并解析元数据；空文件不会入库，避免把 0 字节快照写成正式记录。
 - **文件夹上传**：前端按"扁平 / 树状"结构选择后进入等待上传阶段（树状模式展示目录层级与各文件大小），由用户确认后开始；树状模式逐级创建目录（冲突时选择合并或新建 `(N)`），并按目标目录分组调用 `prepare/execute`。
 - **分辨率**：入库时用 Pillow 独立探测图片宽高（与元数据解析无关），无生成元数据的图片也能得到分辨率；重新读取元数据时同样始终刷新分辨率与文件大小，解析不到生成参数时 `has_metadata` 为 `false`。
+- **采样器 / 调度器归一**：解析结果传出前统一为对照表中的最终记录名（如 `Euler a` / `euler_ancestral` → `Euler ancestral`，`DPM++ 2M Karras` 拆为 `DPMPP 2M` + `Karras`）；表外值保留原文。
 - **秒传**：`prepare` 时若同 SHA256 已有可读副本，后端直接复制并返回 `duplicate: true`（失败自动回退为真实上传）。
 - **分块上传**：按 `chunk_size`（10 MiB）切片；最后一块到达后合并、校验 SHA256、移动入库；返回 `status: success | fail`（失败附 `error` 字段），`saved_path` 为 `/gallery` 相对路径。
-- **配置**：键集合取自 `config_manager.DEFAULT_CONFIG`；尺寸类 64–1024、分级 0–4、`ShowLevel` 为 0–4 列表，非法值返回 400。
+- **配置**：键集合取自 `config_manager.DEFAULT_CONFIG`；尺寸类 64–1024、分级 0–4（`BlurLevel` 额外允许 `-1`=None）、`ShowLevel` 为 0–4 列表，非法值返回 400。
 - **数据库空闲合并**：`DatabaseIdleCheckpointMinutes` 为 0–1440 的整数（0=关闭），写入配置文件后需重启程序才会应用到数据库后台任务。
-- **模型归属**：模型按**文件**关联（file N—N checkpoint/lora/embedding/vae）。`images/models` 返回指定文件绑定的模型；`images/metadata/update` 中的模型数组只修改该文件；`images/model-names` 返回仍被文件引用的去重名称及 `file_count`。
-- **移动**：仅支持 `/gallery` 内；源侧操作固定作用于挂载实际位置；目标同名冲突返回 409；文件夹不得移入自身子树。
+- **模型归属**：模型按**文件**关联（file N—N checkpoint/lora/embedding/vae/upscale）。`images/models` 返回指定文件绑定的模型；`images/metadata/update` 中的模型数组只修改该文件；`images/model-names` 返回仍被文件引用的去重名称及 `file_count`。`kind` 可取 `checkpoint` / `lora` / `embedding` / `vae` / `upscale`。
+- **移动 / 复制**：仅支持 `/gallery` 内；源侧操作固定作用于挂载实际位置；目标同名冲突返回 409；文件夹不得移入/复制到自身子树。复制会保留文件级元数据与模型关联；批量接口与移动一致，逐项返回结果。

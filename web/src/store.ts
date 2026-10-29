@@ -1,4 +1,4 @@
-import { computed, reactive } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { api, ApiError } from './api'
 import type {
   AdvancedQuery,
@@ -43,6 +43,8 @@ export const store = reactive({
   ready: false,
   standalone: false,
   readOnly: false,
+  programVersion: '',
+  dbVersion: 0,
   settings: { ...DEFAULT_SETTINGS },
   path: '/',
   currentUuid: '',
@@ -72,15 +74,21 @@ export const store = reactive({
   editOpen: false,
   editFile: null as SearchFile | null,
   moveOpen: false,
+  moveMode: 'move' as 'move' | 'copy',
   moveTargets: [] as ContextTarget[],
   toasts: [] as ToastItem[],
   context: { open: false, x: 0, y: 0, target: null as ContextTarget | null },
   confirm: { open: false, title: '', message: '', danger: false },
   prompt: { open: false, title: '', label: '', value: '' },
+  choice: {
+    open: false, title: '', message: '',
+    options: [] as Array<{ label: string; value: string }>,
+  },
 })
 
 let pendingConfirm: ((value: boolean) => void) | null = null
 let pendingPrompt: ((value: string | null) => void) | null = null
+let pendingChoice: ((value: string | null) => void) | null = null
 let toastSeq = 0
 let scanner: EventSource | null = null
 let refreshTimer: number | undefined
@@ -97,7 +105,34 @@ function ratingAllowed(rating: number): boolean {
 }
 
 export function isBlurred(rating: number): boolean {
-  return !store.settings.SafeBrowsingMode && rating >= store.settings.BlurLevel
+  const level = store.settings.BlurLevel
+  // -1 = None: 不模糊任何等级
+  return !store.settings.SafeBrowsingMode && level >= 0 && rating >= level
+}
+
+// 主界面中已点击"显示"的图片 (按 路径+文件名 区分), 查看器会沿用该状态
+const revealedFiles = ref(new Set<string>())
+
+function revealKey(file: { path: string; name: string }): string {
+  return `${file.path}\u0000${file.name}`
+}
+
+export function isFileRevealed(file: { path: string; name: string }): boolean {
+  return revealedFiles.value.has(revealKey(file))
+}
+
+export function revealFile(file: { path: string; name: string }): void {
+  revealedFiles.value.add(revealKey(file))
+  revealedFiles.value = new Set(revealedFiles.value)
+}
+
+export function concealFile(file: { path: string; name: string }): void {
+  revealedFiles.value.delete(revealKey(file))
+  revealedFiles.value = new Set(revealedFiles.value)
+}
+
+export function resetRevealedFiles(): void {
+  revealedFiles.value = new Set()
 }
 
 export const visibleFiles = computed<SearchFile[]>(() => {
@@ -148,8 +183,71 @@ export function toast(text: string, kind: ToastItem['kind'] = 'info'): void {
   }, 4200)
 }
 
-export function toastError(err: unknown, prefix = ''): void {
-  const message = err instanceof ApiError ? err.message : String(err)
+export interface ErrorPathContext {
+  /** 源目录逻辑路径 (移动时用于区分源/目标只读) */
+  source?: string | string[]
+  /** 目标目录逻辑路径 */
+  target?: string
+  /** 动作名, 如 "移动" (缺省从 toast 前缀推断) */
+  action?: string
+}
+
+/** 后端逻辑路径 (/gallery/xxx) -> 前端展示路径 (/xxx) */
+function displayLogicalPath(path: string): string {
+  let value = (path || '').trim()
+  if (value === '/gallery') return '/'
+  if (value.startsWith('/gallery/')) value = value.slice('/gallery'.length)
+  return value.replace(/\/+$/, '') || '/'
+}
+
+/** 把后端英文错误中的只读拒绝转为中文; 其他错误原样返回。 */
+export function localizeError(message: string | undefined | null,
+                              action = '写入',
+                              paths: ErrorPathContext = {}): string {
+  const text = (message || '').trim()
+  // 移动操作的专属错误
+  const identical = text.match(
+    /^Source and target directories are identical:\s*(.+)$/i)
+  if (identical) {
+    return `源文件夹（${displayLogicalPath(identical[1])}）与目标文件夹相同`
+  }
+  const subtree = text.match(
+    /^Cannot move a folder into its own subtree:\s*(.+)$/i)
+  if (subtree) {
+    return `不能将文件夹（${displayLogicalPath(subtree[1])}）移动到其自身或其子目录`
+  }
+  const programLevel = /Program-level read-only/i.test(text)
+  if (!programLevel && !/read-only/i.test(text)) return text
+
+  const matched = text.match(/(?:write rejected|rejected):\s*(.+)$/i)
+  const path = matched ? displayLogicalPath(matched[1]) : ''
+  if (programLevel) {
+    return `程序处于只读模式，无法${action}${path ? `（${path}）` : ''}`
+  }
+
+  // 错误路径与源目录一致时是源文件夹只读, 否则按目标文件夹处理
+  const sources = Array.isArray(paths.source)
+    ? paths.source
+    : paths.source ? [paths.source] : []
+  const fromSource = !!path && sources.some(
+    (source) => displayLogicalPath(source) === path)
+  const side = fromSource ? '源文件夹' : '目标文件夹'
+  return `${side}${path ? `（${path}）` : ''}为只读，无法${action}`
+}
+
+export function toastError(err: unknown, prefix = '',
+                           paths: ErrorPathContext = {}): void {
+  let message = String(err)
+  if (err instanceof ApiError) {
+    if (err.code === 40301) {
+      const action = paths.action
+        || prefix.replace(/失败.*$/, '')
+        || '写入'
+      message = localizeError(err.message, action, paths)
+    } else {
+      message = err.message
+    }
+  }
   toast(prefix ? `${prefix}: ${message}` : message, 'error')
 }
 
@@ -202,6 +300,23 @@ export function resolvePrompt(value: string | null): void {
   pendingPrompt = null
 }
 
+export function askChoice(
+  title: string,
+  message: string,
+  options: Array<{ label: string; value: string }>,
+): Promise<string | null> {
+  store.choice = { open: true, title, message, options }
+  return new Promise((resolve) => {
+    pendingChoice = resolve
+  })
+}
+
+export function resolveChoice(value: string | null): void {
+  store.choice.open = false
+  pendingChoice?.(value)
+  pendingChoice = null
+}
+
 // ---------------------------------------------------------------------- #
 // 初始化
 // ---------------------------------------------------------------------- #
@@ -210,6 +325,8 @@ export async function init(): Promise<void> {
   try {
     const status = await api.status()
     store.readOnly = status.read_only
+    store.programVersion = status.version || ''
+    store.dbVersion = status.database_version || 0
     const { settings } = await api.getSettings()
     store.settings = { ...DEFAULT_SETTINGS, ...settings }
   } catch (err) {
@@ -675,6 +792,47 @@ export async function reparseMetadata(file: { path: string; name: string }): Pro
   }
 }
 
+export async function reparseFolderMetadata(
+  folder: ContextTarget,
+): Promise<void> {
+  if (folder.kind !== 'folder') return
+  const folderPath = folder.path === '/'
+    ? `/${folder.name}` : `${folder.path}/${folder.name}`
+  const scope = await askChoice(
+    '重新读取元数据',
+    '请选择要更新的范围：',
+    [
+      { label: '仅当前文件夹', value: 'current' },
+      { label: '包含子目录', value: 'recursive' },
+    ],
+  )
+  if (!scope) return
+  const recursive = scope === 'recursive'
+  const ok = await askConfirm(
+    '确认操作',
+    `将重新读取“${folder.name}”${recursive ? '及其所有子目录' : ''}内的图片元数据，`
+    + '并覆盖数据库中现有的提示词、生成参数与模型信息。确定继续吗？',
+    { danger: true },
+  )
+  if (!ok) return
+  toast('正在重新读取元数据…')
+  try {
+    const result = await api.reparseFolderMetadata(folderPath, recursive)
+    if (result.failed) {
+      toast(`已重新读取 ${result.updated} 个文件，${result.failed} 个失败`,
+            'info')
+    } else {
+      toast(`已重新读取 ${result.updated} 个文件的元数据`, 'success')
+    }
+  } catch (err) {
+    toastError(err, '重新读取元数据失败')
+  } finally {
+    store.viewerBust = Date.now()
+    if (store.viewerOpen) await loadViewerDetails()
+    if (!store.inSearch) void loadContents(store.path, false)
+  }
+}
+
 // ---------------------------------------------------------------------- #
 // 独立查看页 (/view?image=...): 新标签页直接展示图片查看界面
 // ---------------------------------------------------------------------- #
@@ -755,13 +913,14 @@ export async function deleteTargets(targets: ContextTarget[]): Promise<void> {
     )
     const failed = results.filter((r) => !r.ok)
     if (failed.length) {
-      toast(`${failed.length} 个项目删除失败：${failed[0].error ?? ''}`, 'error')
+      toast(`${failed.length} 个项目删除失败：${localizeError(
+        failed[0].error, '删除', { target: failed[0].path })}`, 'error')
     } else {
       toast(`已删除 ${results.length} 个项目`, 'success')
     }
     await refresh()
   } catch (err) {
-    toastError(err, '删除失败')
+    toastError(err, '删除失败', { target: targets[0]?.path })
   }
 }
 
@@ -777,7 +936,7 @@ export async function renameTarget(target: ContextTarget): Promise<void> {
     toast('重命名成功', 'success')
     await refresh()
   } catch (err) {
-    toastError(err, '重命名失败')
+    toastError(err, '重命名失败', { target: target.path })
   }
 }
 
@@ -789,12 +948,14 @@ export async function createFolderHere(): Promise<void> {
     toast('文件夹已创建', 'success')
     await refresh()
   } catch (err) {
-    toastError(err, '创建文件夹失败')
+    toastError(err, '创建文件夹失败', { target: store.path, action: '新建文件夹' })
   }
 }
 
-export function openMoveDialog(targets: ContextTarget[]): void {
+export function openMoveDialog(targets: ContextTarget[],
+                                mode: 'move' | 'copy' = 'move'): void {
   store.moveTargets = [...targets]
+  store.moveMode = mode
   store.moveOpen = true
 }
 
@@ -812,14 +973,49 @@ export async function moveTo(targetPath: string): Promise<void> {
     )
     const failed = results.filter((r) => !r.ok)
     if (failed.length) {
-      toast(`移动失败：${failed[0].error ?? ''}`, 'error')
+      const item = items.find((t) => t.name === failed[0].name
+        && t.path === failed[0].path) ?? items[0]
+      toast(`移动失败：${localizeError(failed[0].error, '移动', {
+        source: item?.path,
+        target: targetPath,
+      })}`, 'error')
     } else {
       toast(`已移动 ${results.length} 个项目`, 'success')
     }
     store.moveOpen = false
     await refresh()
   } catch (err) {
-    toastError(err, '移动失败')
+    toastError(err, '移动失败', {
+      source: items.map((item) => item.path),
+      target: targetPath,
+    })
+  }
+}
+
+export async function copyTo(targetPath: string): Promise<void> {
+  const items = store.moveTargets
+  if (!items.length) return
+  try {
+    const { results } = await api.copyEntries(
+      items.map((t) => ({
+        type: t.kind,
+        name: t.name,
+        source_path: t.path,
+        target_path: targetPath,
+      })),
+    )
+    const failed = results.filter((r) => !r.ok)
+    if (failed.length) {
+      toast(`复制失败：${localizeError(failed[0].error, '复制', {
+        target: targetPath,
+      })}`, 'error')
+    } else {
+      toast(`已复制 ${results.length} 个项目`, 'success')
+    }
+    store.moveOpen = false
+    await refresh()
+  } catch (err) {
+    toastError(err, '复制失败', { target: targetPath })
   }
 }
 

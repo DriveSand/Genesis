@@ -36,10 +36,78 @@ _SUPPORTED_FORMATS = {"PNG", "JPEG", "WEBP"}
 _EXIF_IFD = 0x8769         # Exif IFD 指针 tag
 _TAG_USER_COMMENT = 37510  # ExifIFD.UserComment
 
-# UserComment 字符集前缀 (EXIF 规范, 8 字节) 
+# UserComment 字符集前缀 (EXIF 规范, 8 字节)
 _UC_UNICODE = b"UNICODE\x00"
 _UC_ASCII = b"ASCII\x00\x00\x00"
 _UC_JIS = b"JIS\x00\x00\x00\x00\x00"
+
+# ---- 采样器/调度器统一记录名 (解析器原始写法 -> 最终记录) ----
+# A1111 与 ComfyUI 的写法差异在此收敛; 不在表内的值保持原文。
+_SAMPLER_ALIASES = {
+    "euler": "Euler",
+    "euler a": "Euler ancestral",
+    "euler_ancestral": "Euler ancestral",
+    "dpm++ 2m": "DPMPP 2M",
+    "dpmpp_2m": "DPMPP 2M",
+    "dpm++ sde": "DPMPP 2M SDE",
+    "dpmpp_2m_sde": "DPMPP 2M SDE",
+    "ddim": "DDIM",
+    "unipc": "UniPC",
+    "uni_pc": "UniPC",
+    "lcm": "LCM",
+    "ddpm": "DDPM",
+    "heun": "Heun",
+    "lms": "LMS",
+    "dpm_fast": "DPM Fast",
+    "euler_cfg_pp": "Euler CFG PP",
+    "euler_ancestral_cfg_pp": "Euler ancestral CFG PP",
+    "er_sde": "ER SDE",
+}
+
+_SCHEDULER_ALIASES = {
+    "simple": "Simple",
+    "karras": "Karras",
+    "normal": "Normal",
+    "exponential": "Exponential",
+    "sgm uniform": "SGM Uniform",
+    "sgm_uniform": "SGM Uniform",
+    "ddim uniform": "DDIM Uniform",
+    "ddim_uniform": "DDIM Uniform",
+    "beta": "Beta",
+    "kl_optimal": "KL Optimal",
+    "linear_quadratic": "Linear Quadratic",
+}
+
+# A1111 中把调度器并入采样器名称的常见写法 -> 纯采样器名
+_COMBINED_SAMPLERS = {
+    "dpm++ 2m karras": "DPM++ 2M",
+    "dpm++ sde karras": "DPM++ SDE",
+}
+
+
+def _normalize_generation_params(parsed: dict[str, Any]) -> None:
+    """在结果传出前统一采样器/调度器记录名。
+
+    先拆分 A1111 的 "采样器 + 调度器" 组合写法 (如 DPM++ 2M Karras),
+    再按对照表映射为最终记录; 表外值保持原文。
+    """
+    sampler = parsed.get("sampler")
+    scheduler = parsed.get("scheduler")
+    sampler_text = sampler.strip() if isinstance(sampler, str) else ""
+    scheduler_text = scheduler.strip() if isinstance(scheduler, str) else ""
+
+    combined = _COMBINED_SAMPLERS.get(sampler_text.casefold())
+    if combined is not None:
+        sampler_text = combined
+        if not scheduler_text:
+            scheduler_text = "Karras"
+
+    if sampler_text:
+        parsed["sampler"] = _SAMPLER_ALIASES.get(
+            sampler_text.casefold(), sampler_text)
+    if scheduler_text:
+        parsed["scheduler"] = _SCHEDULER_ALIASES.get(
+            scheduler_text.casefold(), scheduler_text)
 
 
 def parse_metadata(file_path: str) -> dict[str, Any] | None:
@@ -121,6 +189,7 @@ def parse_raw_metadata(raw: RawMetadata) -> dict[str, Any] | None:
         parsed.setdefault("width", raw.width)
         parsed.setdefault("height", raw.height)
         parsed.setdefault("file_size", raw.file_size)
+        _normalize_generation_params(parsed)
         return parsed
     log.debug(f"No matching parser: {raw.file_path}")
     return None

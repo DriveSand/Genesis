@@ -51,6 +51,7 @@ export interface ModelsResponse {
   lora: ModelLora[]
   embedding: ModelSimple[]
   vae: ModelSimple[]
+  upscale: ModelSimple[]
 }
 
 export interface ImageMetadata {
@@ -131,6 +132,15 @@ export interface AdvancedQuery {
 
 export const RATING_NAMES = ['G', 'PG-13', 'R', 'X', 'XXX'] as const
 
+// 开始模糊的等级: -1 表示不模糊任何等级 (None)
+export const BLUR_LEVELS = [
+  { value: -1, label: 'None' },
+  { value: 1, label: 'PG-13' },
+  { value: 2, label: 'R' },
+  { value: 3, label: 'X' },
+  { value: 4, label: 'XXX' },
+] as const
+
 export const RATING_COLORS = [
   '#0078d4', // G: 蓝
   '#c99a00', // PG-13: 黄
@@ -139,8 +149,16 @@ export const RATING_COLORS = [
   '#d13438', // XXX: 红
 ] as const
 
-export const SAMPLERS = ['Euler', 'Euler a', 'DPM++ 2M', 'DPM++ 2M Karras', 'DPM++ SDE', 'DPM++ SDE Karras', 'DDIM', 'UniPC', 'LCM', 'Heun']
-export const SCHEDULERS = ['Normal', 'Karras', 'Exponential', 'SGM Uniform', 'DDIM Uniform', 'Simple', 'Beta']
+// 统一后的最终记录名
+export const SAMPLERS = [
+  'Euler', 'Euler ancestral', 'DPMPP 2M', 'DPMPP 2M SDE', 'DDIM',
+  'UniPC', 'LCM', 'DDPM', 'Heun', 'LMS', 'DPM Fast',
+  'Euler CFG PP', 'Euler ancestral CFG PP', 'ER SDE',
+]
+export const SCHEDULERS = [
+  'Simple', 'Karras', 'Normal', 'Exponential', 'SGM Uniform',
+  'DDIM Uniform', 'Beta', 'KL Optimal', 'Linear Quadratic',
+]
 export const TOOLS = ['ComfyUI', 'A1111 WebUI', 'InvokeAI', 'NovelAI', 'Fooocus', 'SD.Next']
 export const FILE_TYPES = ['JPEG', 'PNG', 'WEBP', 'GIF', 'BMP', 'TIFF', 'MP4', 'WEBM']
 export const MODEL_KINDS = ['Checkpoint', 'LoRA', 'LyCORIS', 'Embedding', 'VAE'] as const

@@ -6,4 +6,4 @@
 PROGRAM_VERSION = "1.3.0"
 
 # SQLite 结构版本 (PRAGMA user_version) ; 升级逻辑见 scripts/database/upgrade.py
-DATABASE_VERSION = 2
+DATABASE_VERSION = 3

@@ -9,7 +9,7 @@ import {
   toast,
   toastError,
 } from '../store'
-import { RATING_NAMES, type Settings } from '../types'
+import { BLUR_LEVELS, RATING_NAMES, type Settings } from '../types'
 
 const cacheBytes = ref(0)
 const cacheFiles = ref(0)
@@ -147,8 +147,10 @@ async function clearCache(): Promise<void> {
             <span class="label">开始模糊的等级</span>
             <select class="field select" :value="store.settings.BlurLevel"
                     @change="setSelectNumber('BlurLevel', $event)">
-              <option v-for="(name, level) in RATING_NAMES" :key="name" :value="level">
-                {{ name }}
+              <!-- 旧配置可能仍为 0 (G)，保留显示以免选择框错位 -->
+              <option v-if="store.settings.BlurLevel === 0" :value="0">G</option>
+              <option v-for="level in BLUR_LEVELS" :key="level.value" :value="level.value">
+                {{ level.label }}
               </option>
             </select>
           </div>
@@ -176,6 +178,22 @@ async function clearCache(): Promise<void> {
                    @change="setNumber('DatabaseIdleCheckpointMinutes', $event, 0, 1440)" />
             <span class="muted">分钟</span>
             <span class="muted small">0 表示关闭；修改后重启程序生效</span>
+          </div>
+        </section>
+
+        <section class="group">
+          <h3>关于</h3>
+          <div class="line">
+            <span class="label">软件版本</span>
+            <span class="value">{{ store.programVersion || '—' }}</span>
+          </div>
+          <div class="line">
+            <span class="label">数据库版本</span>
+            <span class="value">{{ store.dbVersion || '—' }}</span>
+          </div>
+          <div class="line">
+            <span class="label">只读模式</span>
+            <span class="value">{{ store.readOnly ? '是' : '否' }}</span>
           </div>
         </section>
       </div>

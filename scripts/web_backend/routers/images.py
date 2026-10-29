@@ -1,12 +1,14 @@
 """图片: 元数据/模型查询与修改、缩略图、原图。"""
-import time
+import asyncio
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from exceptions import InputDataError, PathNotFoundError
 from scripts.sha256 import normalize_sha256
+from scripts.thumbnail_gen import PRIORITY_INTERACTIVE
 from scripts.web_backend.helpers import (
+    gallery_full,
     iter_stream,
     join_rel,
     locate_file,
@@ -40,7 +42,7 @@ def _lora_models(rows: list[dict]) -> list[dict]:
 def model_names(request: Request, kind: str, limit: int = 500) -> dict:
     """某种模型在图库中出现过的去重名称 (供编辑界面联想) 。"""
     state = request.app.state.genesis
-    if kind not in ("checkpoint", "lora", "embedding", "vae"):
+    if kind not in ("checkpoint", "lora", "embedding", "vae", "upscale"):
         raise InputDataError(f"Invalid model kind: {kind}")
     rows = state.db.list_model_names(kind)
     return {"kind": kind,
@@ -49,7 +51,7 @@ def model_names(request: Request, kind: str, limit: int = 500) -> dict:
 
 @router.get("/models")
 def models(request: Request, image_path: str) -> dict:
-    """获取图片使用的模型 (checkpoint / lora / embedding / vae) 。"""
+    """获取图片使用的模型 (checkpoint / lora / embedding / vae / upscale) 。"""
     state = request.app.state.genesis
     loc = locate_file(state, image_path)
     grouped = state.db.get_file_models(loc["path_uuid"], loc["filename"])
@@ -58,6 +60,7 @@ def models(request: Request, image_path: str) -> dict:
         "lora": _lora_models(grouped.get("lora", [])),
         "embedding": _simple_models(grouped.get("embedding", [])),
         "vae": _simple_models(grouped.get("vae", [])),
+        "upscale": _simple_models(grouped.get("upscale", [])),
     }
 
 
@@ -100,6 +103,16 @@ def refresh_metadata(request: Request, image_path: str) -> dict:
     meta = state.fm.reparse_metadata(parent, filename)
     return {"ok": True, "has_metadata": bool(meta),
             "tool": str(meta.get("tool") or "")}
+
+
+@router.post("/metadata/refresh-folder")
+def refresh_folder_metadata(request: Request, folder_path: str,
+                            recursive: bool = False) -> dict:
+    """重新读取文件夹内全部图片的元数据 (递归与否由 recursive 决定)。"""
+    state = request.app.state.genesis
+    result = state.fm.reparse_folder_metadata(
+        gallery_full(folder_path), recursive=recursive)
+    return {"ok": True, **result}
 
 
 @router.post("/metadata/update")
@@ -145,6 +158,10 @@ def update_metadata(request: Request, body: MetadataUpdateRequest) -> dict:
         model_updates["vaes"] = [
             {"name": m["model_name"], "version": m.get("version", ""),
              "url": m.get("model_url")} for m in change["vae"]]
+    if change.get("upscale") is not None:
+        model_updates["upscales"] = [
+            {"name": m["model_name"], "version": m.get("version", ""),
+             "url": m.get("model_url")} for m in change["upscale"]]
     if change.get("lora") is not None:
         loras = []
         for m in change["lora"]:
@@ -164,8 +181,12 @@ def update_metadata(request: Request, body: MetadataUpdateRequest) -> dict:
 
 
 @router.get("/thumbnail")
-def thumbnail(request: Request, image_sha256: str) -> StreamingResponse:
-    """获取缩略图 (WebP) ; 缓存不存在时按需生成并等待完成。"""
+async def thumbnail(request: Request, image_sha256: str) -> StreamingResponse:
+    """获取缩略图 (WebP) ; 缓存不存在时按需生成并等待完成。
+
+    使用异步 Future 等待, 不占用 FastAPI 的工作线程; 交互任务优先于
+    批量预生成队列, 避免大量缩略图积压拖慢目录浏览。
+    """
     state = request.app.state.genesis
     sha = normalize_sha256(image_sha256)
     if sha is None:
@@ -174,19 +195,20 @@ def thumbnail(request: Request, image_sha256: str) -> StreamingResponse:
     parent = f"/cache/image/{sha}"
     name = f"{short_side}.webp"
 
-    if not state.fm.file_exists(parent, name):
-        # 去重提交: 同一 SHA256 已在队列中时返回 False, 此处统一轮询等结果
-        state.thumb.submit_by_sha(sha)
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            if state.fm.file_exists(parent, name):
-                break
-            time.sleep(0.1)
+    if not await asyncio.to_thread(state.fm.file_exists, parent, name):
+        future = state.thumb.ensure_by_sha(sha, priority=PRIORITY_INTERACTIVE)
+        if future is not None:
+            try:
+                # shield: 单个请求超时不影响其他等待同一任务的请求
+                await asyncio.wait_for(
+                    asyncio.shield(asyncio.wrap_future(future)), timeout=30)
+            except Exception:  # noqa: BLE001 超时/生成失败统一走文件检查
+                pass
 
-    if not state.fm.file_exists(parent, name):
+    if not await asyncio.to_thread(state.fm.file_exists, parent, name):
         raise PathNotFoundError(
             f"Thumbnail is not available for SHA256: {sha}")
-    stream = state.fm.read_file(parent, name)
+    stream = await asyncio.to_thread(state.fm.read_file, parent, name)
     return StreamingResponse(
         iter_stream(stream), media_type="image/webp",
         headers={"Cache-Control": "public, max-age=86400"})
@@ -199,7 +221,8 @@ def regenerate_thumbnail(request: Request, image_sha256: str) -> dict:
     sha = normalize_sha256(image_sha256)
     if sha is None:
         raise InputDataError(f"Invalid SHA256 format: {image_sha256!r}")
-    submitted = state.thumb.submit_by_sha(sha, overwrite=True)
+    submitted = state.thumb.submit_by_sha(
+        sha, overwrite=True, priority=PRIORITY_INTERACTIVE)
     return {"ok": True, "submitted": bool(submitted)}
 
 

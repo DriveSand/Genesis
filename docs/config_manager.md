@@ -181,7 +181,7 @@ MountConfig(logical_path: str, physical_path: str, readonly: bool, priority: int
 | `AutoRefresh` | `bool` | `True` | 前端自动刷新 |
 | `ShowLevel` | `list[int]` | `[0,1,2,3,4]` | 允许显示的图片等级集合 |
 | `SafeBrowsingMode` | `bool` | `False` | 安全浏览模式（只显示 G 级图像） |
-| `BlurLevel` | `int` | `2` | 开始模糊的等级（0=G，1=PG-13，2=R，3=X，4=XXX） |
+| `BlurLevel` | `int` | `2` | 开始模糊的等级（-1=None 不模糊，0=G，1=PG-13，2=R，3=X，4=XXX） |
 | `DatabaseIdleCheckpointMinutes` | `int` | `10` | 数据库写空闲多少分钟后执行 WAL checkpoint（0=关闭，范围 0–1440）；**修改后重启程序生效** |
 
 ---
