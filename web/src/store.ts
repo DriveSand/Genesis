@@ -155,6 +155,23 @@ export const visibleFolders = computed<FolderEntry[]>(() =>
   store.inSearch ? [] : store.folders,
 )
 
+/** 原地更新列表中已加载文件的字段。
+ *
+ * 元数据修改只影响分级/大小等展示字段, 不应重新读取整个目录:
+ * 重读会把已加载的后续页全部丢弃, 滚动位置跳回顶部, 并重新请求全部缩略图。
+ */
+export function patchListingFile(
+  file: { path: string; name: string },
+  patch: Partial<Pick<FileEntry, 'rating' | 'file_size'>>,
+): void {
+  for (const entry of store.files) {
+    if (entry.path === file.path && entry.name === file.name) Object.assign(entry, patch)
+  }
+  for (const entry of store.searchFiles) {
+    if (entry.path === file.path && entry.name === file.name) Object.assign(entry, patch)
+  }
+}
+
 export const currentViewerFile = computed<SearchFile | null>(
   () => visibleFiles.value[store.viewerIndex] ?? null,
 )
@@ -397,13 +414,22 @@ function buildBreadcrumbs(path: string): Array<{ name: string; path: string }> {
   return crumbs
 }
 
+// 目录读取序号: 新请求覆盖旧请求, 过期响应 (含进行中的附加加载) 直接丢弃
+let loadSeq = 0
+
 export async function loadContents(path: string, append = false): Promise<void> {
-  if (store.loading || store.loadingMore) return
-  if (append && !store.hasMore) return
-  if (append) store.loadingMore = true
-  else store.loading = true
+  if (append) {
+    if (store.loading || store.loadingMore || !store.hasMore) return
+    store.loadingMore = true
+  } else {
+    // 完整读取优先于进行中的附加加载, 后者的结果会被序号检查丢弃
+    store.loading = true
+    store.loadingMore = false
+  }
+  const seq = append ? loadSeq : ++loadSeq
   try {
     const data = await api.contents(path, gridQuantity(), append ? store.cursor : '')
+    if (seq !== loadSeq) return
     if (!append) {
       store.folders = data.folders
       store.files = data.files
@@ -420,10 +446,12 @@ export async function loadContents(path: string, append = false): Promise<void> 
       Boolean(data.current_cursor)
     if (!append) syncScanner()
   } catch (err) {
-    toastError(err, '读取目录失败')
+    if (seq === loadSeq) toastError(err, '读取目录失败')
   } finally {
-    store.loading = false
-    store.loadingMore = false
+    if (seq === loadSeq) {
+      store.loading = false
+      store.loadingMore = false
+    }
   }
 }
 
@@ -661,12 +689,20 @@ export async function openViewer(file: SearchFile): Promise<void> {
   await loadViewerDetails()
 }
 
-export async function loadViewerDetails(): Promise<void> {
+/**
+ * 读取当前查看图片的元数据/模型。
+ *
+ * keepCurrent 用于同一张图片的刷新 (保存修改、重新读取元数据):
+ * 保留旧内容直到新结果返回, 避免信息栏闪空。
+ */
+export async function loadViewerDetails(keepCurrent = false): Promise<void> {
   const file = currentViewerFile.value
   if (!file) return
-  store.viewerLoading = true
-  store.metadata = null
-  store.models = null
+  if (!keepCurrent) {
+    store.viewerLoading = true
+    store.metadata = null
+    store.models = null
+  }
   const path = imagePathOf(file)
   try {
     const [metadata, models] = await Promise.all([
@@ -761,10 +797,16 @@ export function closeEditor(): void {
   store.editFile = null
 }
 
-export async function afterMetadataSaved(): Promise<void> {
-  store.viewerBust = Date.now()
-  if (store.viewerOpen) await loadViewerDetails()
-  if (!store.inSearch) void loadContents(store.path, false)
+export async function afterMetadataSaved(
+  file: { path: string; name: string },
+  change: Record<string, unknown>,
+): Promise<void> {
+  // 分级只影响本地的过滤/模糊展示, 原地更新即可;
+  // 不重读目录、不刷新缩略图, 避免已滚动的位置被重置。
+  if (typeof change.rating === 'number') {
+    patchListingFile(file, { rating: change.rating })
+  }
+  if (store.viewerOpen) await loadViewerDetails(true)
 }
 
 export async function reparseMetadata(file: { path: string; name: string }): Promise<void> {
@@ -776,19 +818,22 @@ export async function reparseMetadata(file: { path: string; name: string }): Pro
   if (!ok) return
   try {
     const result = await api.reparseMetadata(imagePathOf(file))
+    // 重新读取会刷新分辨率/文件大小: 只更新列表中对应条目, 不重读整个目录
+    try {
+      const meta = await api.metadata(imagePathOf(file))
+      patchListingFile(file, { rating: meta.rating, file_size: meta.file_size })
+    } catch {
+      // 读取失败时列表保留原值; 查看器仍会展示最新解析结果
+    }
     if (result.has_metadata) {
       toast('元数据已重新读取', 'success')
     } else {
       // 无生成参数时分辨率/文件大小仍会被刷新
       toast('未找到生成元数据，已刷新分辨率与文件大小', 'info')
     }
+    if (store.viewerOpen) await loadViewerDetails(true)
   } catch (err) {
     toastError(err, '重新读取元数据失败')
-  } finally {
-    // 无论解析结果如何都刷新界面: 分辨率/文件大小可能已更新
-    store.viewerBust = Date.now()
-    if (store.viewerOpen) await loadViewerDetails()
-    if (!store.inSearch) void loadContents(store.path, false)
   }
 }
 
@@ -827,9 +872,9 @@ export async function reparseFolderMetadata(
   } catch (err) {
     toastError(err, '重新读取元数据失败')
   } finally {
-    store.viewerBust = Date.now()
-    if (store.viewerOpen) await loadViewerDetails()
-    if (!store.inSearch) void loadContents(store.path, false)
+    // 文件夹内文件大小可能变化, 但当前目录列表无需重读:
+    // 重读会丢弃已加载的后续页并重置滚动位置。
+    if (store.viewerOpen) await loadViewerDetails(true)
   }
 }
 
