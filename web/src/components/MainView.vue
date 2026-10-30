@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import Icon from './Icon.vue'
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, formatBytes, formatTime } from '../api'
 import {
   concealFile,
@@ -20,6 +20,7 @@ import {
   resetRevealedFiles,
   revealFile,
   store,
+  toastError,
   visibleFiles,
   visibleFolders,
   type ContextTarget,
@@ -136,12 +137,92 @@ const selectionCount = computed(
   () => selectedFiles.value.length + selectedFolders.value.length,
 )
 
-function onScroll(event: Event): void {
-  const el = event.target as HTMLElement
-  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 500) {
-    void loadMore()
-  }
+// 距离底部多少像素时开始加载下一页
+const LOAD_MORE_MARGIN = 500
+
+const hasMore = computed<boolean>(() =>
+  store.inSearch ? store.searchHasMore : store.hasMore)
+
+function loadedCount(): number {
+  return store.files.length + store.folders.length + store.searchFiles.length
 }
+
+function nearEnd(el: HTMLElement): boolean {
+  return el.scrollTop + el.clientHeight >= el.scrollHeight - LOAD_MORE_MARGIN
+}
+
+let filling = false
+
+/** 检查内容是否需要补页。
+ *
+ * 分级过滤在本地进行: 一页数据过滤后可能只剩很少条目甚至为空,
+ * 内容不足以产生滚动时不会触发 scroll 事件, 下一页就永远取不到。
+ * 因此列表每次变化后都检查一次, 仍在底部附近且有下一页时继续加载,
+ * 直到填满视口或数据取完。
+ */
+async function fillViewport(): Promise<void> {
+  if (filling) return
+  const el = scrollEl.value
+  if (!el || store.loading || store.loadingMore || !hasMore.value) return
+  if (!nearEnd(el)) return
+  filling = true
+  const before = loadedCount()
+  try {
+    await loadMore()
+  } catch (err) {
+    // 目录模式的错误已由 loadContents 提示; 搜索模式在此兜底并停止补页
+    if (store.inSearch) toastError(err, '加载更多失败')
+    return
+  } finally {
+    filling = false
+  }
+  // 没有任何进展时停止, 避免游标异常时反复请求同一页
+  if (loadedCount() <= before) return
+  await nextTick()
+  void fillViewport()
+}
+
+function onScroll(event: Event): void {
+  if (nearEnd(event.target as HTMLElement)) void fillViewport()
+}
+
+watch(
+  () => [
+    store.path,
+    store.inSearch,
+    store.files.length,
+    store.folders.length,
+    store.searchFiles.length,
+    visibleFiles.value.length,
+    store.hasMore,
+    store.searchHasMore,
+    store.loading,
+    store.loadingMore,
+    store.settings.GridCellSize,
+    store.settings.SafeBrowsingMode,
+    store.settings.ShowLevel.join(','),
+  ],
+  () => { void fillViewport() },
+  { flush: 'post' },
+)
+
+// 视口尺寸变化后每页容量随之改变, 变大时内容可能再次不足一屏
+let resizeTimer: number | undefined
+
+function onResize(): void {
+  if (resizeTimer) window.clearTimeout(resizeTimer)
+  resizeTimer = window.setTimeout(() => { void fillViewport() }, 150)
+}
+
+onMounted(() => {
+  window.addEventListener('resize', onResize)
+  void fillViewport()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', onResize)
+  if (resizeTimer) window.clearTimeout(resizeTimer)
+})
 
 function onSelectionDownload(): void {
   void downloadTargets(selectedFiles.value, selectedFolders.value)
@@ -250,9 +331,13 @@ function ratingBadge(rating: number): string {
         </div>
       </div>
 
-      <div v-if="!visibleFiles.length && !visibleFolders.length && !store.loading"
+      <div v-if="!visibleFiles.length && !visibleFolders.length && !store.loading && !hasMore"
            class="empty-tip">
-        {{ store.inSearch ? '没有匹配的图片' : '此目录为空，拖入图片或点击上传' }}
+        {{ store.inSearch
+          ? '没有匹配的图片'
+          : store.files.length
+            ? '没有符合当前显示等级的图片'
+            : '此目录为空，拖入图片或点击上传' }}
       </div>
 
       <div v-if="store.loadingMore" class="load-more muted">加载更多…</div>

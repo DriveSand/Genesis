@@ -236,10 +236,11 @@ async function save(): Promise<void> {
   }
   saving.value = true
   try {
-    await api.updateMetadata({ name: file.name, path: file.path }, change)
+    const target = { name: file.name, path: file.path }
+    await api.updateMetadata(target, change)
     toast('修改已保存', 'success')
     closeEditor()
-    await afterMetadataSaved()
+    await afterMetadataSaved(target, change)
   } catch (err) {
     toastError(err, '保存失败')
   } finally {
